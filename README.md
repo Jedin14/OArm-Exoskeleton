@@ -1,11 +1,11 @@
 # OpenArm Bimanual Exoskeleton Teleoperation
 
-![Teleoperation Banner](src/qnbot_teleoperator/images/teleop_banner.png)
+![Teleoperation](Teleop.png)
 
-This package provides a complete, low-latency teleoperation stack for controlling the bimanual OpenArm v10 using a wearable exoskeleton. It bridges raw exoskeleton data via WebSocket, performs kinematic retargeting, and securely interfaces with the `ros2_control` hardware interface.
+This package provides a complete, low-latency teleoperation stack for controlling the bimanual OpenArm using a wearable exoskeleton. It bridges raw exoskeleton data via WebSocket, performs kinematic retargeting, and securely interfaces with the `ros2_control` hardware interface.
 
 <p align="center">
-  <img src="src/qnbot_teleoperator/images/openarm_exo.png" alt="OpenArm Exoskeleton" width="400"/>
+  <img src="arm.png" alt="OpenArm" width="400"/>
 </p>
 
 ## Features
@@ -46,16 +46,7 @@ Once the launch file is running:
 
 ## Architecture Pipeline
 
-```mermaid
-graph TD
-    A[Qnbot HMI AppImage] -- JSON over WebSocket --> B[WebSocket Teleoperator Node]
-    B -- Raw Joint Angles --> C[Exo Retargeting Node]
-    C -- Kinematic Mapping & Deadzones --> D[Retargeted Joint Angles]
-    D --> E[Exoskeleton Bridge Node]
-    E -- 3s Safe Blend & EMA Smoothing --> F[Continuous 100Hz Command Array]
-    F -- Float64MultiArray --> G[ros2_control Forward Position Controllers]
-    G -- CAN-FD MIT Control --> H[Physical OpenArm v10]
-```
+
 
 1. **WebSocket Teleoperator Node**
    Listens on port `19091` for incoming JSON packets from the Qnbot HMI containing raw joint angles.
