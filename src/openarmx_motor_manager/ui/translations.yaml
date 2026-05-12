@@ -1,0 +1,1121 @@
+# 翻译配置文件
+# Translation Configuration File
+
+zh_CN:
+  # 窗口标题
+  window_title: "OpenArmX Pro Max 电机管理系统"
+
+  # CAN接口操作
+  can_group: "CAN接口操作"
+  start_can: "启动CAN接口"
+  stop_can: "禁用CAN接口"
+  check_can: "检查CAN状态"
+
+  # 电机控制
+  motor_control_group: "电机控制"
+  enable_all: "启用所有电机"
+  disable_all: "禁用所有电机"
+  go_home: "回零"
+  set_zero: "设置零点"
+  test_single: "单电机测试"
+  test_all: "测试全部电机"
+  random_motion: "电机随机运动"
+  start_moveit: "启动MoveIt"
+  start_moveit_standard: "启动标准版MoveIt"
+
+  # 电机监控
+  motor_monitor_group: "电机监控"
+  check_status: "检查电机状态"
+
+  # 菜单栏
+  menu_robot: "机器人(&R)"
+  menu_can: "CAN(&C)"
+  menu_settings: "设置(&S)"
+  menu_language: "语言(L)"
+  menu_help: "帮助(H)"
+
+  # 菜单项
+  action_add_robot: "添加机器人"
+  action_preferences: "首选项"
+  action_exit: "退出"
+  action_about: "关于"
+  action_chinese: "中文"
+  action_english: "English"
+  action_japanese: "日本語"
+  action_russian: "Русский"
+  action_clear_password: "清除密码"
+  action_settings: "设置"
+
+  # 添加机器人对话框
+  robot_add_title: "添加机器人"
+  robot_add_name_prompt: "请输入机器人名称:"
+  robot_add_default_name: "机器人{number}"
+  robot_add_select_right: "选择右臂CAN通道"
+  robot_add_select_left: "选择左臂CAN通道"
+  robot_add_select_right_prompt: "请选择右臂CAN通道:"
+  robot_add_select_left_prompt: "请选择左臂CAN通道:"
+  robot_add_config_title: "选择配置方式"
+  robot_add_config_prompt: "检测到 {count} 个CAN接口: {interfaces}\n\n请选择配置方式:"
+  robot_add_auto_config: "自动配置"
+  robot_add_manual_config: "手动配置"
+  robot_add_auto_pair_info: "将使用CAN接口配对: {right} (右臂) + {left} (左臂)\n\n请输入机器人名称:"
+  robot_close_confirm_title: "确认关闭"
+  robot_close_confirm_msg: "确定要关闭机器人'{name}'吗？"
+
+  # CAN接口提示
+  can_insufficient_title: "CAN接口不足"
+  can_insufficient_msg: "检测到{count}个CAN接口，至少需要2个CAN接口来控制一个双臂机器人。\n\n检测到的接口: {interfaces}"
+  can_not_detected_title: "未检测到CAN接口"
+  can_not_detected_msg: "未检测到任何CAN接口！\n\n可能的原因：\n1. 系统没有CAN硬件设备\n2. CAN驱动未加载\n3. 请检查CAN盒是否已插上\n\n提示: 请插上CAN盒后重试"
+  can_no_real_title: "无真实CAN接口"
+  can_no_real_msg: "没有找到真实的CAN接口！\n\n所有检测到的接口都是虚拟接口。"
+  can_config_failed_title: "配置失败"
+  can_config_failed_msg: "无法自动配对CAN接口"
+  can_no_available_pair_title: "无可用配对"
+  can_no_available_pair_msg: "所有CAN接口都已被使用。\n\n请使用手动配置或关闭现有机器人页面。"
+  can_no_left_channel_title: "错误"
+  can_no_left_channel_msg: "没有可用的左臂CAN通道"
+  can_config_invalid_title: "配置无效"
+  can_enable_success_title: "CAN接口启用成功"
+  can_enable_success_msg: "成功启用 {count} 个CAN接口：\n{interfaces}"
+  can_enable_partial_title: "部分接口启用失败"
+  can_enable_partial_msg: "成功启用: {success}/{total}\n\n失败的接口: {failed}"
+  can_enable_failed_title: "CAN接口启用失败"
+  can_enable_failed_msg: "所有CAN接口启用失败！\n\n失败的接口: {failed}"
+  can_enable_error_title: "错误"
+  can_enable_error_msg: "启动CAN接口时发生错误：\n{error}"
+  can_disable_no_need_title: "无需禁用"
+  can_disable_no_need_msg: "未检测到任何已启用的CAN接口！\n\n可能的原因：\n1. 所有CAN接口已经处于DOWN状态\n2. 系统没有CAN硬件设备"
+  can_disable_no_real_title: "无需禁用"
+  can_disable_no_real_msg: "没有找到真实的CAN接口需要禁用！\n\n所有检测到的接口都是虚拟接口。"
+  can_disable_success_title: "CAN接口禁用成功"
+  can_disable_success_msg: "成功禁用 {count} 个CAN接口：\n{interfaces}"
+  can_disable_partial_title: "部分接口禁用失败"
+  can_disable_partial_msg: "成功禁用: {success}/{total}\n\n失败的接口: {failed}"
+  can_disable_failed_title: "CAN接口禁用失败"
+  can_disable_failed_msg: "所有CAN接口禁用失败！\n\n失败的接口: {failed}"
+  can_disable_error_title: "错误"
+  can_disable_error_msg: "禁用CAN接口时发生错误：\n{error}"
+  can_status_title: "CAN状态"
+  can_status_no_interface: "未检测到CAN接口"
+  password_required_title: "需要密码"
+  password_required_msg: "请在设置中配置sudo密码"
+
+  # 设置对话框 - 窗口
+  settings_dialog_title: "设置"
+  settings_title: "脚本路径配置"
+  settings_description: "配置 MoveIt 启动脚本的路径"
+
+  # 设置对话框 - 脚本配置组
+  settings_sim_group: "仿真版 MoveIt 脚本"
+  settings_can_group: "真机版 MoveIt 脚本 (CAN)"
+  settings_script_name: "脚本文件名: {script_name}"
+  settings_path_placeholder: "请选择脚本文件路径..."
+  settings_browse_button: "浏览..."
+  settings_clear_button: "清除"
+  settings_status_valid: "✓ 路径有效"
+  settings_status_no_permission: "⚠ 文件存在但可能没有执行权限"
+  settings_status_not_exist: "✗ 路径不存在"
+
+  # 设置对话框 - 密码相关
+  password_config_group: "Sudo 密码配置"
+  password_desc: "用于启用/禁用CAN接口时自动输入sudo密码"
+  password_placeholder: "请输入sudo密码..."
+  password_show: "显示"
+  password_hide: "隐藏"
+  password_clear: "清除"
+  password_hint: "提示: 密码将以明文形式保存在配置文件中，请确保配置文件安全"
+
+  # 首次密码输入对话框
+  password_first_time_title: "需要密码"
+  password_first_time_msg: "CAN接口操作需要sudo权限，请输入sudo密码：\n\n注意：密码将以明文形式保存在配置文件中"
+  password_saved: "密码已保存"
+  password_not_entered: "未输入密码，CAN操作可能失败"
+
+  # 设置对话框 - 按钮
+  settings_reset_button: "恢复默认"
+  settings_cancel_button: "取消"
+  settings_save_button: "保存"
+
+  # 设置对话框 - 消息
+  settings_reset_confirm_title: "确认恢复默认"
+  settings_reset_confirm_msg: "这将恢复所有设置为首次配置时的状态（包括脚本路径和密码）。\n\n确定要继续吗？"
+  settings_reset_complete_title: "恢复完成"
+  settings_reset_complete_msg: "所有设置已恢复为首次配置时的状态。"
+  settings_incomplete_title: "配置不完整"
+  settings_incomplete_msg: "至少需要配置一个脚本路径。"
+  settings_sim_path_not_exist: "仿真脚本路径不存在:\n{sim_path}"
+  settings_can_path_not_exist: "真机脚本路径不存在:\n{can_path}"
+  settings_invalid_path_title: "路径无效"
+  settings_check_path_msg: "\n\n请检查路径是否正确。"
+  settings_save_success_title: "保存成功"
+  settings_save_success_msg: "配置已保存！\n\n新的脚本路径和密码将在下次使用时生效。"
+  settings_save_failed_title: "保存失败"
+  settings_save_failed_msg: "配置保存失败，请检查文件权限。"
+  settings_select_script_title: "选择脚本文件"
+  settings_file_filter: "Shell脚本 (*.sh);;所有文件 (*)"
+
+  # 欢迎页面
+  welcome_tab_title: "欢迎"
+  welcome_title: "OpenArmX 多机器人管理系统"
+  welcome_greeting: "欢迎使用多机器人管理系统！"
+  welcome_quick_start: "快速开始："
+  welcome_step1: "点击菜单栏 <b>机器人 → 添加机器人</b> 来添加新的机器人控制页面"
+  welcome_step2: "点击菜单栏 <b>CAN → 启动CAN接口</b> 来启动CAN通信"
+  welcome_step3: "每个机器人页面可以独立控制一个双臂机器人"
+
+  # 机器人页面
+  robot_page_info: "右臂:{right_channel} | 左臂:{left_channel}"
+  robot_page_output_group: "输出栏"
+  robot_page_created: "机器人页面已创建: {robot_name} (右:{right_channel}, 左:{left_channel})"
+  robot_page_task_running: "已有任务正在执行，请等待完成"
+  robot_page_task_start: "开始执行任务: {task}"
+  robot_page_test_single_pending: "单电机测试功能待实现"
+  robot_page_cleanup: "机器人页面已清理: {robot_name}"
+
+  # 底部标签
+  footer: "成都长数机器人有限公司 | https://openarmx.com/"
+
+  # 对话框
+  about_title: "关于"
+  about_content: |
+    OpenArmX Pro Max 电机管理系统
+
+    版本: 1.0
+    作者: 魏林栋
+    公司: 成都长数机器人有限公司
+    网站: https://openarmx.com/
+
+  # 日志消息 - 系统
+  log_startup: "系统启动成功"
+  log_waiting: "提示：请在菜单栏选择'机器人' → '添加机器人'来添加机器人控制页面"
+  log_switch_to_chinese: "切换到中文"
+  log_switch_to_english: "Switch to English"
+  log_switch_to_japanese: "日本語に切り替え"
+  log_switch_to_russian: "Переключено на русский язык"
+
+  # 日志消息 - 机器人
+  log_robot_added: "机器人'{robot_name}'已添加到系统"
+  log_icon_loaded: "图标加载成功: {icon_name}"
+
+  # 日志消息 - CAN操作
+  log_can_start_begin: "开始启动CAN接口..."
+  log_can_detected: "检测到 {count} 个CAN接口: {interfaces}"
+  log_can_no_interface: "未检测到CAN接口，请插上CAN盒"
+  log_can_real_interface: "{iface}: 真实CAN接口 ✓"
+  log_can_virtual_interface: "{iface}: 虚拟接口，跳过"
+  log_can_no_real_interface: "没有找到真实的CAN接口"
+  log_can_found_real: "找到 {count} 个真实CAN接口"
+  log_can_enabling: "正在启用 {iface}..."
+  log_can_enable_success: "{iface}: 启用成功 ✓"
+  log_can_enable_verify_fail: "{iface}: 启用失败（验证未通过）✗"
+  log_can_enable_fail: "{iface}: 启用失败 ✗"
+  log_can_all_enabled: "所有CAN接口启用成功！({success}/{total})"
+  log_can_partial_enabled: "部分CAN接口启用成功 ({success}/{total})"
+  log_can_all_enable_failed: "所有CAN接口启用失败"
+  log_can_enable_error: "CAN启动异常: {error}"
+
+  log_can_stop_begin: "开始禁用CAN接口..."
+  log_can_active_detected: "检测到 {count} 个已启用的CAN接口: {interfaces}"
+  log_can_no_active: "未检测到已启用的CAN接口"
+  log_can_will_disable: "{iface}: 真实CAN接口，将禁用"
+  log_can_no_real_to_disable: "没有找到真实的CAN接口需要禁用"
+  log_can_found_to_disable: "找到 {count} 个真实CAN接口需要禁用"
+  log_can_disabling: "正在禁用 {iface}..."
+  log_can_disable_success: "{iface}: 禁用成功 ✓"
+  log_can_disable_verify_fail: "{iface}: 禁用失败（仍然UP）✗"
+  log_can_disable_fail: "{iface}: 禁用失败 ✗"
+  log_can_all_disabled: "所有CAN接口禁用成功！({success}/{total})"
+  log_can_partial_disabled: "部分CAN接口禁用成功 ({success}/{total})"
+  log_can_all_disable_failed: "所有CAN接口禁用失败"
+  log_can_disable_error: "CAN禁用异常: {error}"
+
+  log_can_status_detected: "检测到{count}个CAN接口"
+  log_password_not_provided: "未获取到密码，操作取消"
+  log_password_using_saved: "使用已保存的密码"
+
+  # 日志消息 - 首次运行
+  log_first_run_detecting: "检测到首次运行，正在自动检测脚本位置..."
+  log_script_detected: "✓ 已检测到{type_name}: {path}"
+  log_script_multiple: "检测到 {count} 个{type_name}，请选择..."
+  log_script_not_selected: "未选择{type_name}，跳过"
+  log_script_selected: "✓ 已选择{type_name}: {path}"
+  log_scripts_saved: "脚本路径已保存到配置文件"
+  log_scripts_not_found: "未检测到脚本，请在设置中手动配置"
+
+  # 单电机测试窗口 - 安全提示
+  test_motor_warning: |
+    安全提示：
+    1. 请务必在确保电机安装牢固且无人员靠近的情况下进行测试。
+    2. 初次测试时，请使用较小的位置、速度、扭矩、KP、KD值(小于最大值的10%)，避免电机突然高速运转。
+    3. 请勿超过电机的最大参数限制，以防止损坏电机或引发安全事故。
+    4. 测试过程中如发现异常情况，请立即停止测试并检查设备状态。
+    5. 使用本测试工具即表示您已了解并接受可能的安全风险。
+    6. 设备启动时，操作人员须将手悬停在紧急停止按钮上方；如遇突发情况，应立即按下急停按钮。
+
+  # 单电机测试窗口 - 安全确认对话框
+  test_motor_confirm_title: "安全确认"
+  test_motor_confirm_message: |
+    您是否已经认真阅读了安全提示？
+
+    请确认：
+    - 已使用较小的速度、扭矩、KP、KD值
+    - 参数不超过最大值的10%
+    - 了解可能的安全风险
+
+    确认后将启动电机测试。
+
+  # 单电机测试对话框
+  single_motor_test_title: "单电机测试 - MIT模式"
+  single_motor_safety_warning: |
+    <b><font color='red'>⚠️ 安全提示</font></b><br><br>
+    <b>1. 设备启动前确认：</b><br>
+    ✓ 电机安装牢固且周围无人员<br>
+    ✓ 操作人员手悬停在紧急停止按钮上方<br><br>
+    <b>2. 初次测试参数建议：</b><br>
+    ✓ 位置、速度、扭矩、KP、KD值应小于最大值的10%<br>
+    ✓ 避免电机突然高速运转<br><br>
+    <b>3. 测试过程中：</b><br>
+    ✓ 请勿超过电机的最大参数限制<br>
+    ✓ 发现异常情况立即按下急停按钮<br><br>
+    <b>4. 风险提示：</b><br>
+    ✓ 使用本测试工具即表示您已了解并接受可能的安全风险<br>
+    ✓ 不当操作可能导致设备损坏或人身伤害<br><br>
+    <font color='red'><b>请认真阅读以上安全提示后再进行测试！</b></font>
+  single_motor_select_group: "电机选择"
+  single_motor_arm_label: "机械臂:"
+  single_motor_right_arm: "右臂 (Right)"
+  single_motor_left_arm: "左臂 (Left)"
+  single_motor_motor_id_label: "电机ID:"
+  single_motor_mit_params: "MIT模式参数"
+  single_motor_position_label: "位置 (rad):"
+  single_motor_position_tooltip: "目标位置，单位：弧度"
+  single_motor_velocity_label: "速度 (rad/s):"
+  single_motor_velocity_tooltip: "目标速度，单位：弧度/秒"
+  single_motor_torque_label: "扭矩 (Nm):"
+  single_motor_torque_tooltip: "前馈扭矩，单位：牛米"
+  single_motor_kp_label: "Kp (位置增益):"
+  single_motor_kp_tooltip: "位置增益，建议范围：0-100"
+  single_motor_kd_label: "Kd (速度增益):"
+  single_motor_kd_tooltip: "速度增益，建议范围：0-10"
+  single_motor_send_button: "发送命令"
+  single_motor_disable_button: "失能电机"
+  single_motor_confirm_title: "安全确认"
+  single_motor_confirm_message: |
+    <b><font color='red'>⚠ 安全确认</font></b><br><br>
+    您是否已经认真阅读了安全提示？<br><br>
+    <b>即将发送命令到：{arm} 电机 {motor_id}</b><br><br>
+    <b>参数设置：</b><br>
+    位置: {position:.3f} rad<br>
+    速度: {velocity:.3f} rad/s<br>
+    扭矩: {torque:.3f} Nm<br>
+    Kp: {kp:.2f}<br>
+    Kd: {kd:.2f}<br><br>
+    <font color='red'><b>请确认：</b><br>
+    ✓ 已使用较小的速度、扭矩、KP、KD值<br>
+    ✓ 参数不超过最大值的10%（初次测试）<br>
+    ✓ 电机安装牢固且周围无人员<br>
+    ✓ 了解可能的安全风险</font>
+  single_motor_disable_title: "确认失能"
+  single_motor_disable_confirm: "确认失能 {arm} 电机 {motor_id}？\n\n电机将停止运行。"
+
+en_US:
+  # Window Title
+  window_title: "OpenArmX Pro Max Motor Management System"
+
+  # CAN Interface
+  can_group: "CAN Interface"
+  start_can: "Start CAN"
+  stop_can: "Stop CAN"
+  check_can: "Check CAN Status"
+
+  # Motor Control
+  motor_control_group: "Motor Control"
+  enable_all: "Enable All Motors"
+  disable_all: "Disable All Motors"
+  go_home: "Go Home"
+  set_zero: "Set Zero"
+  test_single: "Test Single Motor"
+  test_all: "Test All Motors"
+  random_motion: "Random Motor Motion"
+  start_moveit: "Start MoveIt"
+  start_moveit_standard: "Start MoveIt Standard"
+
+  # Motor Monitor
+  motor_monitor_group: "Motor Monitor"
+  check_status: "Check Motor Status"
+
+  # Menu Bar
+  menu_robot: "Robot(&R)"
+  menu_can: "CAN(&C)"
+  menu_settings: "Settings(&S)"
+  menu_language: "Language(L)"
+  menu_help: "Help(H)"
+
+  # Menu Items
+  action_add_robot: "Add Robot"
+  action_preferences: "Preferences"
+  action_exit: "Exit"
+  action_about: "About"
+  action_chinese: "中文"
+  action_english: "English"
+  action_japanese: "日本語"
+  action_russian: "Русский"
+  action_clear_password: "Clear Password"
+  action_settings: "Settings"
+
+  # Add Robot Dialog
+  robot_add_title: "Add Robot"
+  robot_add_name_prompt: "Please enter robot name:"
+  robot_add_default_name: "Robot {number}"
+  robot_add_select_right: "Select Right Arm CAN Channel"
+  robot_add_select_left: "Select Left Arm CAN Channel"
+  robot_add_select_right_prompt: "Please select right arm CAN channel:"
+  robot_add_select_left_prompt: "Please select left arm CAN channel:"
+  robot_add_config_title: "Select Configuration Method"
+  robot_add_config_prompt: "Detected {count} CAN interfaces: {interfaces}\n\nPlease select configuration method:"
+  robot_add_auto_config: "Auto Configuration"
+  robot_add_manual_config: "Manual Configuration"
+  robot_add_auto_pair_info: "Will use CAN interface pairing: {right} (right arm) + {left} (left arm)\n\nPlease enter robot name:"
+  robot_close_confirm_title: "Confirm Close"
+  robot_close_confirm_msg: "Are you sure you want to close robot '{name}'?"
+
+  # CAN Interface Messages
+  can_insufficient_title: "Insufficient CAN Interfaces"
+  can_insufficient_msg: "Detected {count} CAN interfaces, at least 2 CAN interfaces are required to control a dual-arm robot.\n\nDetected interfaces: {interfaces}"
+  can_not_detected_title: "No CAN Interface Detected"
+  can_not_detected_msg: "No CAN interface detected!\n\nPossible reasons:\n1. System has no CAN hardware device\n2. CAN driver not loaded\n3. Please check if CAN box is plugged in\n\nTip: Please retry after plugging in the CAN box"
+  can_no_real_title: "No Real CAN Interface"
+  can_no_real_msg: "No real CAN interfaces found!\n\nAll detected interfaces are virtual."
+  can_config_failed_title: "Configuration Failed"
+  can_config_failed_msg: "Unable to auto-pair CAN interfaces"
+  can_no_available_pair_title: "No Available Pair"
+  can_no_available_pair_msg: "All CAN interfaces are already in use.\n\nPlease use manual configuration or close existing robot pages."
+  can_no_left_channel_title: "Error"
+  can_no_left_channel_msg: "No available left arm CAN channel"
+  can_config_invalid_title: "Invalid Configuration"
+  can_enable_success_title: "CAN Interface Enabled"
+  can_enable_success_msg: "Successfully enabled {count} CAN interfaces:\n{interfaces}"
+  can_enable_partial_title: "Partial Interface Enable Failed"
+  can_enable_partial_msg: "Successfully enabled: {success}/{total}\n\nFailed interfaces: {failed}"
+  can_enable_failed_title: "CAN Interface Enable Failed"
+  can_enable_failed_msg: "All CAN interfaces failed to enable!\n\nFailed interfaces: {failed}"
+  can_enable_error_title: "Error"
+  can_enable_error_msg: "Error occurred while starting CAN interface:\n{error}"
+  can_disable_no_need_title: "No Need to Disable"
+  can_disable_no_need_msg: "No enabled CAN interfaces detected!\n\nPossible reasons:\n1. All CAN interfaces are already in DOWN state\n2. System has no CAN hardware device"
+  can_disable_no_real_title: "No Need to Disable"
+  can_disable_no_real_msg: "No real CAN interfaces found that need to be disabled!\n\nAll detected interfaces are virtual."
+  can_disable_success_title: "CAN Interface Disabled"
+  can_disable_success_msg: "Successfully disabled {count} CAN interfaces:\n{interfaces}"
+  can_disable_partial_title: "Partial Interface Disable Failed"
+  can_disable_partial_msg: "Successfully disabled: {success}/{total}\n\nFailed interfaces: {failed}"
+  can_disable_failed_title: "CAN Interface Disable Failed"
+  can_disable_failed_msg: "All CAN interfaces failed to disable!\n\nFailed interfaces: {failed}"
+  can_disable_error_title: "Error"
+  can_disable_error_msg: "Error occurred while disabling CAN interface:\n{error}"
+  can_status_title: "CAN Status"
+  can_status_no_interface: "No CAN interface detected"
+  password_required_title: "Password Required"
+  password_required_msg: "Please configure sudo password in settings"
+
+  # Settings Dialog - Window
+  settings_dialog_title: "Settings"
+  settings_title: "Script Path Configuration"
+  settings_description: "Configure MoveIt startup script paths"
+
+  # Settings Dialog - Script Groups
+  settings_sim_group: "Simulation MoveIt Script"
+  settings_can_group: "Real Robot MoveIt Script (CAN)"
+  settings_script_name: "Script filename: {script_name}"
+  settings_path_placeholder: "Please select script file path..."
+  settings_browse_button: "Browse..."
+  settings_clear_button: "Clear"
+  settings_status_valid: "✓ Path valid"
+  settings_status_no_permission: "⚠ File exists but may not have execute permission"
+  settings_status_not_exist: "✗ Path does not exist"
+
+  # Settings Dialog - Password Related
+  password_config_group: "Sudo Password Configuration"
+  password_desc: "Used for automatic sudo password input when enabling/disabling CAN interface"
+  password_placeholder: "Please enter sudo password..."
+  password_show: "Show"
+  password_hide: "Hide"
+  password_clear: "Clear"
+  password_hint: "Note: Password will be saved in plain text in the configuration file, please ensure file security"
+
+  # First-time Password Input Dialog
+  password_first_time_title: "Password Required"
+  password_first_time_msg: "CAN interface operation requires sudo privileges, please enter sudo password:\n\nNote: Password will be saved in plain text in the configuration file"
+  password_saved: "Password saved"
+  password_not_entered: "Password not entered, CAN operations may fail"
+
+  # Settings Dialog - Buttons
+  settings_reset_button: "Reset to Default"
+  settings_cancel_button: "Cancel"
+  settings_save_button: "Save"
+
+  # Settings Dialog - Messages
+  settings_reset_confirm_title: "Confirm Reset"
+  settings_reset_confirm_msg: "This will restore all settings to their initial configuration (including script paths and password).\n\nAre you sure you want to continue?"
+  settings_reset_complete_title: "Reset Complete"
+  settings_reset_complete_msg: "All settings have been restored to their initial configuration."
+  settings_incomplete_title: "Incomplete Configuration"
+  settings_incomplete_msg: "At least one script path must be configured."
+  settings_sim_path_not_exist: "Simulation script path does not exist:\n{sim_path}"
+  settings_can_path_not_exist: "Real robot script path does not exist:\n{can_path}"
+  settings_invalid_path_title: "Invalid Path"
+  settings_check_path_msg: "\n\nPlease check if the path is correct."
+  settings_save_success_title: "Save Successful"
+  settings_save_success_msg: "Configuration saved!\n\nNew script paths and password will take effect next time."
+  settings_save_failed_title: "Save Failed"
+  settings_save_failed_msg: "Failed to save configuration, please check file permissions."
+  settings_select_script_title: "Select Script File"
+  settings_file_filter: "Shell Scripts (*.sh);;All Files (*)"
+
+  # Welcome Page
+  welcome_tab_title: "Welcome"
+  welcome_title: "OpenArmX Multi-Robot Management System"
+  welcome_greeting: "Welcome to the Multi-Robot Management System!"
+  welcome_quick_start: "Quick Start:"
+  welcome_step1: "Click menu <b>Robot → Add Robot</b> to add a new robot control page"
+  welcome_step2: "Click menu <b>CAN → Start CAN Interface</b> to start CAN communication"
+  welcome_step3: "Each robot page can independently control a dual-arm robot"
+
+  # Robot Page
+  robot_page_info: "Right Arm:{right_channel} | Left Arm:{left_channel}"
+  robot_page_output_group: "Output"
+  robot_page_created: "Robot page created: {robot_name} (Right:{right_channel}, Left:{left_channel})"
+  robot_page_task_running: "A task is already running, please wait for completion"
+  robot_page_task_start: "Starting task: {task}"
+  robot_page_test_single_pending: "Single motor test function pending implementation"
+  robot_page_cleanup: "Robot page cleaned up: {robot_name}"
+
+  # Footer
+  footer: "Chengdu Changshu Robot Co., Ltd. | https://openarmx.com/"
+
+  # Dialog
+  about_title: "About"
+  about_content: |
+    OpenArmX Pro Max Motor Management System
+
+    Version: 1.0
+    Author: Wei Lindong
+    Company: Chengdu Changshu Robot Co., Ltd.
+    Website: https://openarmx.com/
+
+  # Log Messages
+  log_startup: "System started successfully"
+  log_waiting: "Waiting for user operation..."
+  log_switch_to_english: "Switch to English"
+  log_already_english: "Already in English"
+
+  # Test Motor Window - Safety Warning
+  test_motor_warning: |
+    Safety Warning:
+    1. Ensure the motor is securely installed and no personnel are nearby before testing.
+    2. For initial tests, use smaller position, velocity, torque, KP, KD values (less than 10% of maximum) to avoid sudden high-speed rotation.
+    3. Do not exceed the motor's maximum parameter limits to prevent motor damage or safety accidents.
+    4. If any abnormality occurs during testing, stop immediately and check equipment status.
+    5. Using this test tool indicates that you understand and accept potential safety risks.
+    6. When starting the device, operators must keep their hand hovering above the emergency stop button; press it immediately in case of emergency.
+
+  # Test Motor Window - Safety Confirmation Dialog
+  test_motor_confirm_title: "Safety Confirmation"
+  test_motor_confirm_message: |
+    Have you carefully read the safety warnings?
+
+    Please confirm:
+    - Using smaller velocity, torque, KP, KD values
+    - Parameters do not exceed 10% of maximum
+    - Understanding potential safety risks
+
+    Motor test will start after confirmation.
+
+  # Single Motor Test Dialog
+  single_motor_test_title: "Single Motor Test - MIT Mode"
+  single_motor_safety_warning: |
+    <b><font color='red'>⚠️ Safety Warning</font></b><br><br>
+    <b>1. Before Starting Equipment:</b><br>
+    ✓ Ensure motor is securely mounted and no personnel nearby<br>
+    ✓ Operator's hand hovering above emergency stop button<br><br>
+    <b>2. Initial Test Parameter Recommendations:</b><br>
+    ✓ Position, velocity, torque, KP, KD values should be less than 10% of maximum<br>
+    ✓ Avoid sudden high-speed motor rotation<br><br>
+    <b>3. During Testing:</b><br>
+    ✓ Do not exceed motor's maximum parameter limits<br>
+    ✓ Press emergency stop immediately if abnormality detected<br><br>
+    <b>4. Risk Notice:</b><br>
+    ✓ Using this test tool indicates you understand and accept potential safety risks<br>
+    ✓ Improper operation may cause equipment damage or personal injury<br><br>
+    <font color='red'><b>Please read the safety warnings carefully before testing!</b></font>
+  single_motor_select_group: "Motor Selection"
+  single_motor_arm_label: "Arm:"
+  single_motor_right_arm: "Right Arm"
+  single_motor_left_arm: "Left Arm"
+  single_motor_motor_id_label: "Motor ID:"
+  single_motor_mit_params: "MIT Mode Parameters"
+  single_motor_position_label: "Position (rad):"
+  single_motor_position_tooltip: "Target position in radians"
+  single_motor_velocity_label: "Velocity (rad/s):"
+  single_motor_velocity_tooltip: "Target velocity in radians per second"
+  single_motor_torque_label: "Torque (Nm):"
+  single_motor_torque_tooltip: "Feedforward torque in Newton-meters"
+  single_motor_kp_label: "Kp (Position Gain):"
+  single_motor_kp_tooltip: "Position gain, recommended range: 0-100"
+  single_motor_kd_label: "Kd (Velocity Gain):"
+  single_motor_kd_tooltip: "Velocity gain, recommended range: 0-10"
+  single_motor_send_button: "Send Command"
+  single_motor_disable_button: "Disable Motor"
+  single_motor_confirm_title: "Safety Confirmation"
+  single_motor_confirm_message: |
+    <b><font color='red'>⚠ Safety Confirmation</font></b><br><br>
+    Have you carefully read the safety warnings?<br><br>
+    <b>About to send command to: {arm} Motor {motor_id}</b><br><br>
+    <b>Parameter Settings:</b><br>
+    Position: {position:.3f} rad<br>
+    Velocity: {velocity:.3f} rad/s<br>
+    Torque: {torque:.3f} Nm<br>
+    Kp: {kp:.2f}<br>
+    Kd: {kd:.2f}<br><br>
+    <font color='red'><b>Please confirm:</b><br>
+    ✓ Using smaller velocity, torque, KP, KD values<br>
+    ✓ Parameters do not exceed 10% of maximum (initial test)<br>
+    ✓ Motor securely mounted and no personnel nearby<br>
+    ✓ Understanding potential safety risks</font>
+  single_motor_disable_title: "Confirm Disable"
+  single_motor_disable_confirm: "Confirm disable {arm} Motor {motor_id}?\n\nMotor will stop operating."
+
+ja_JP:
+  # ウィンドウタイトル
+  window_title: "OpenArmX Pro Max モーター管理システム"
+
+  # CANインターフェース操作
+  can_group: "CANインターフェース操作"
+  start_can: "CANを起動"
+  stop_can: "CANを停止"
+  check_can: "CANステータス確認"
+
+  # モーター制御
+  motor_control_group: "モーター制御"
+  enable_all: "全モーター有効化"
+  disable_all: "全モーター無効化"
+  go_home: "原点復帰"
+  set_zero: "ゼロ点設定"
+  test_single: "単一モーターテスト"
+  test_all: "全モーターテスト"
+  random_motion: "モーターランダム動作"
+  start_moveit: "MoveItを起動"
+  start_moveit_standard: "標準版MoveItを起動"
+
+  # モーター監視
+  motor_monitor_group: "モーター監視"
+  check_status: "モーター状態確認"
+
+  # メニューバー
+  menu_robot: "ロボット(&R)"
+  menu_can: "CAN(&C)"
+  menu_settings: "設定(&S)"
+  menu_language: "言語(L)"
+  menu_help: "ヘルプ(H)"
+
+  # メニュー項目
+  action_add_robot: "ロボットを追加"
+  action_preferences: "環境設定"
+  action_exit: "終了"
+  action_about: "バージョン情報"
+  action_chinese: "中文"
+  action_english: "English"
+  action_japanese: "日本語"
+  action_russian: "Русский"
+  action_clear_password: "パスワードをクリア"
+  action_settings: "設定"
+
+  # ロボット追加ダイアログ
+  robot_add_title: "ロボットを追加"
+  robot_add_name_prompt: "ロボット名を入力してください:"
+  robot_add_default_name: "ロボット{number}"
+  robot_add_select_right: "右アームCANチャンネルを選択"
+  robot_add_select_left: "左アームCANチャンネルを選択"
+  robot_add_select_right_prompt: "右アームCANチャンネルを選択してください:"
+  robot_add_select_left_prompt: "左アームCANチャンネルを選択してください:"
+  robot_add_config_title: "設定方法を選択"
+  robot_add_config_prompt: "{count} 個のCANインターフェースを検出しました: {interfaces}\n\n設定方法を選択してください:"
+  robot_add_auto_config: "自動設定"
+  robot_add_manual_config: "手動設定"
+  robot_add_auto_pair_info: "CANインターフェースペアリングを使用します: {right} (右アーム) + {left} (左アーム)\n\nロボット名を入力してください:"
+  robot_close_confirm_title: "閉じる確認"
+  robot_close_confirm_msg: "ロボット'{name}'を閉じてもよろしいですか？"
+
+  # CANインターフェースメッセージ
+  can_insufficient_title: "CANインターフェース不足"
+  can_insufficient_msg: "{count}個のCANインターフェースが検出されました。双腕ロボットを制御するには少なくとも2つのCANインターフェースが必要です。\n\n検出されたインターフェース: {interfaces}"
+  can_not_detected_title: "CANインターフェースが検出されません"
+  can_not_detected_msg: "CANインターフェースが検出されませんでした！\n\n考えられる原因：\n1. システムにCANハードウェアデバイスがありません\n2. CANドライバーがロードされていません\n3. CANボックスが接続されているか確認してください\n\nヒント: CANボックスを接続してから再試行してください"
+  can_no_real_title: "実際のCANインターフェースがありません"
+  can_no_real_msg: "実際のCANインターフェースが見つかりませんでした！\n\n検出されたすべてのインターフェースは仮想です。"
+  can_config_failed_title: "設定失敗"
+  can_config_failed_msg: "CANインターフェースの自動ペアリングができませんでした"
+  can_no_available_pair_title: "利用可能なペアがありません"
+  can_no_available_pair_msg: "すべてのCANインターフェースは既に使用中です。\n\n手動設定を使用するか、既存のロボットページを閉じてください。"
+  can_no_left_channel_title: "エラー"
+  can_no_left_channel_msg: "利用可能な左アームCANチャンネルがありません"
+  can_config_invalid_title: "無効な設定"
+  can_enable_success_title: "CANインターフェースが有効化されました"
+  can_enable_success_msg: "{count} 個のCANインターフェースを正常に有効化しました：\n{interfaces}"
+  can_enable_partial_title: "一部のインターフェース有効化失敗"
+  can_enable_partial_msg: "有効化成功: {success}/{total}\n\n失敗したインターフェース: {failed}"
+  can_enable_failed_title: "CANインターフェース有効化失敗"
+  can_enable_failed_msg: "すべてのCANインターフェースの有効化に失敗しました！\n\n失敗したインターフェース: {failed}"
+  can_enable_error_title: "エラー"
+  can_enable_error_msg: "CANインターフェース起動中にエラーが発生しました：\n{error}"
+  can_disable_no_need_title: "無効化の必要なし"
+  can_disable_no_need_msg: "有効化されたCANインターフェースが検出されませんでした！\n\n考えられる原因：\n1. すべてのCANインターフェースが既にDOWN状態です\n2. システムにCANハードウェアデバイスがありません"
+  can_disable_no_real_title: "無効化の必要なし"
+  can_disable_no_real_msg: "無効化する必要のある実際のCANインターフェースが見つかりませんでした！\n\n検出されたすべてのインターフェースは仮想です。"
+  can_disable_success_title: "CANインターフェースが無効化されました"
+  can_disable_success_msg: "{count} 個のCANインターフェースを正常に無効化しました：\n{interfaces}"
+  can_disable_partial_title: "一部のインターフェース無効化失敗"
+  can_disable_partial_msg: "無効化成功: {success}/{total}\n\n失敗したインターフェース: {failed}"
+  can_disable_failed_title: "CANインターフェース無効化失敗"
+  can_disable_failed_msg: "すべてのCANインターフェースの無効化に失敗しました！\n\n失敗したインターフェース: {failed}"
+  can_disable_error_title: "エラー"
+  can_disable_error_msg: "CANインターフェース無効化中にエラーが発生しました：\n{error}"
+  can_status_title: "CANステータス"
+  can_status_no_interface: "CANインターフェースが検出されません"
+  password_required_title: "パスワードが必要です"
+  password_required_msg: "設定でsudoパスワードを設定してください"
+
+  # 設定ダイアログ - ウィンドウ
+  settings_dialog_title: "設定"
+  settings_title: "スクリプトパス設定"
+  settings_description: "MoveIt起動スクリプトのパスを設定"
+
+  # 設定ダイアログ - スクリプト設定グループ
+  settings_sim_group: "シミュレーション版 MoveIt スクリプト"
+  settings_can_group: "実機版 MoveIt スクリプト (CAN)"
+  settings_script_name: "スクリプトファイル名: {script_name}"
+  settings_path_placeholder: "スクリプトファイルパスを選択してください..."
+  settings_browse_button: "参照..."
+  settings_clear_button: "クリア"
+  settings_status_valid: "✓ パス有効"
+  settings_status_no_permission: "⚠ ファイルは存在しますが実行権限がない可能性があります"
+  settings_status_not_exist: "✗ パスが存在しません"
+
+  # 設定ダイアログ - パスワード関連
+  password_config_group: "Sudoパスワード設定"
+  password_desc: "CANインターフェースの有効化/無効化時にsudoパスワードを自動入力"
+  password_placeholder: "sudoパスワードを入力してください..."
+  password_show: "表示"
+  password_hide: "非表示"
+  password_clear: "クリア"
+  password_hint: "注意: パスワードは設定ファイルに平文で保存されます。ファイルのセキュリティを確保してください"
+
+  # 初回パスワード入力ダイアログ
+  password_first_time_title: "パスワードが必要です"
+  password_first_time_msg: "CANインターフェース操作にはsudo権限が必要です。sudoパスワードを入力してください：\n\n注意：パスワードは設定ファイルに平文で保存されます"
+  password_saved: "パスワードが保存されました"
+  password_not_entered: "パスワードが入力されていません。CAN操作が失敗する可能性があります"
+
+  # 設定ダイアログ - ボタン
+  settings_reset_button: "デフォルトに戻す"
+  settings_cancel_button: "キャンセル"
+  settings_save_button: "保存"
+
+  # 設定ダイアログ - メッセージ
+  settings_reset_confirm_title: "デフォルトに戻す確認"
+  settings_reset_confirm_msg: "すべての設定を初期設定時の状態に戻します（スクリプトパスとパスワードを含む）。\n\n続行しますか？"
+  settings_reset_complete_title: "リセット完了"
+  settings_reset_complete_msg: "すべての設定が初期設定時の状態に戻されました。"
+  settings_incomplete_title: "設定が不完全"
+  settings_incomplete_msg: "少なくとも1つのスクリプトパスを設定する必要があります。"
+  settings_sim_path_not_exist: "シミュレーションスクリプトパスが存在しません:\n{sim_path}"
+  settings_can_path_not_exist: "実機スクリプトパスが存在しません:\n{can_path}"
+  settings_invalid_path_title: "無効なパス"
+  settings_check_path_msg: "\n\nパスが正しいか確認してください。"
+  settings_save_success_title: "保存成功"
+  settings_save_success_msg: "設定が保存されました！\n\n新しいスクリプトパスとパスワードは次回使用時に有効になります。"
+  settings_save_failed_title: "保存失敗"
+  settings_save_failed_msg: "設定の保存に失敗しました。ファイルの権限を確認してください。"
+  settings_select_script_title: "スクリプトファイルを選択"
+  settings_file_filter: "Shellスクリプト (*.sh);;すべてのファイル (*)"
+
+  # ようこそページ
+  welcome_tab_title: "ようこそ"
+  welcome_title: "OpenArmX マルチロボット管理システム"
+  welcome_greeting: "マルチロボット管理システムへようこそ！"
+  welcome_quick_start: "クイックスタート："
+  welcome_step1: "メニューバー <b>ロボット → ロボットを追加</b> をクリックして、新しいロボット制御ページを追加します"
+  welcome_step2: "メニューバー <b>CAN → CANインターフェース起動</b> をクリックして、CAN通信を開始します"
+  welcome_step3: "各ロボットページは独立して双腕ロボットを制御できます"
+
+  # ロボットページ
+  robot_page_info: "右アーム:{right_channel} | 左アーム:{left_channel}"
+  robot_page_output_group: "出力"
+  robot_page_created: "ロボットページが作成されました: {robot_name} (右:{right_channel}, 左:{left_channel})"
+  robot_page_task_running: "既にタスクが実行中です。完了をお待ちください"
+  robot_page_task_start: "タスクを開始: {task}"
+  robot_page_test_single_pending: "単一モーターテスト機能は実装予定です"
+  robot_page_cleanup: "ロボットページがクリーンアップされました: {robot_name}"
+
+  # フッター
+  footer: "成都長数機器人有限公司 | https://openarmx.com/"
+
+  # ダイアログ
+  about_title: "バージョン情報"
+  about_content: |
+    OpenArmX Pro Max モーター管理システム
+
+    バージョン: 1.0
+    作者: 魏林栋
+    会社: 成都長数機器人有限公司
+    ウェブサイト: https://openarmx.com/
+
+  # ログメッセージ
+  log_startup: "システム起動成功"
+  log_waiting: "ユーザー操作待機中..."
+  log_switch_to_japanese: "日本語に切り替え"
+  log_already_japanese: "既に日本語です"
+
+  # モーターテストウィンドウ - 安全警告
+  test_motor_warning: |
+    安全警告：
+    1. テストを実行する前に、モーターがしっかりと固定され、周囲に人がいないことを確認してください。
+    2. 初回テストでは、位置、速度、トルク、KP、KD値を小さく設定し（最大値の10%未満）、急な高速回転を避けてください。
+    3. モーターの損傷や安全事故を防ぐため、最大パラメータ制限を超えないでください。
+    4. テスト中に異常が発生した場合は、直ちに停止して機器の状態を確認してください。
+    5. このテストツールを使用することは、潜在的な安全リスクを理解し、受け入れたことを意味します。
+    6. 機器起動時、作業者は非常停止ボタンの上に手を待機させ、緊急時には直ちにボタンを押してください。
+
+  # モーターテストウィンドウ - 安全確認ダイアログ
+  test_motor_confirm_title: "安全確認"
+  test_motor_confirm_message: |
+    安全警告を注意深く読みましたか？
+
+    確認事項：
+    - 小さい速度、トルク、KP、KD値を使用
+    - パラメータが最大値の10%を超えない
+    - 潜在的な安全リスクを理解
+
+    確認後、モーターテストを開始します。
+
+  # 単一モーターテストダイアログ
+  single_motor_test_title: "単一モーターテスト - MITモード"
+  single_motor_safety_warning: |
+    <b><font color='red'>⚠️ 安全警告</font></b><br><br>
+    <b>1. 機器起動前の確認：</b><br>
+    ✓ モーターがしっかりと固定され、周囲に人がいないことを確認<br>
+    ✓ 作業者の手を非常停止ボタンの上に待機<br><br>
+    <b>2. 初回テストのパラメータ推奨：</b><br>
+    ✓ 位置、速度、トルク、KP、KD値は最大値の10%未満<br>
+    ✓ 急な高速回転を避ける<br><br>
+    <b>3. テスト中：</b><br>
+    ✓ モーターの最大パラメータ制限を超えない<br>
+    ✓ 異常が検出された場合は直ちに非常停止を押す<br><br>
+    <b>4. リスク通知：</b><br>
+    ✓ このテストツールを使用することは、潜在的な安全リスクを理解し受け入れたことを意味します<br>
+    ✓ 不適切な操作は機器の損傷や人身傷害を引き起こす可能性があります<br><br>
+    <font color='red'><b>テスト前に安全警告をよく読んでください！</b></font>
+  single_motor_select_group: "モーター選択"
+  single_motor_arm_label: "アーム:"
+  single_motor_right_arm: "右アーム"
+  single_motor_left_arm: "左アーム"
+  single_motor_motor_id_label: "モーターID:"
+  single_motor_mit_params: "MITモードパラメータ"
+  single_motor_position_label: "位置 (rad):"
+  single_motor_position_tooltip: "目標位置（ラジアン）"
+  single_motor_velocity_label: "速度 (rad/s):"
+  single_motor_velocity_tooltip: "目標速度（ラジアン/秒）"
+  single_motor_torque_label: "トルク (Nm):"
+  single_motor_torque_tooltip: "フィードフォワードトルク（ニュートンメートル）"
+  single_motor_kp_label: "Kp (位置ゲイン):"
+  single_motor_kp_tooltip: "位置ゲイン、推奨範囲：0-100"
+  single_motor_kd_label: "Kd (速度ゲイン):"
+  single_motor_kd_tooltip: "速度ゲイン、推奨範囲：0-10"
+  single_motor_send_button: "コマンド送信"
+  single_motor_disable_button: "モーター無効化"
+  single_motor_confirm_title: "安全確認"
+  single_motor_confirm_message: |
+    <b><font color='red'>⚠ 安全確認</font></b><br><br>
+    安全警告を注意深く読みましたか？<br><br>
+    <b>コマンド送信先：{arm} モーター {motor_id}</b><br><br>
+    <b>パラメータ設定：</b><br>
+    位置: {position:.3f} rad<br>
+    速度: {velocity:.3f} rad/s<br>
+    トルク: {torque:.3f} Nm<br>
+    Kp: {kp:.2f}<br>
+    Kd: {kd:.2f}<br><br>
+    <font color='red'><b>確認事項：</b><br>
+    ✓ 小さい速度、トルク、KP、KD値を使用<br>
+    ✓ パラメータが最大値の10%を超えない（初回テスト）<br>
+    ✓ モーターがしっかりと固定され、周囲に人がいない<br>
+    ✓ 潜在的な安全リスクを理解</font>
+  single_motor_disable_title: "無効化確認"
+  single_motor_disable_confirm: "{arm} モーター {motor_id} の無効化を確認しますか？\n\nモーターは動作を停止します。"
+
+ru_RU:
+  # Заголовок окна
+  window_title: "Система управления двигателями OpenArmX Pro Max"
+
+  # Управление интерфейсом CAN
+  can_group: "Управление CAN"
+  start_can: "Запустить CAN"
+  stop_can: "Остановить CAN"
+  check_can: "Проверить статус CAN"
+
+  # Управление двигателем
+  motor_control_group: "Управление двигателем"
+  enable_all: "Включить все двигатели"
+  disable_all: "Отключить все двигатели"
+  go_home: "Вернуться в исходное положение"
+  set_zero: "Установить ноль"
+  test_single: "Тест одного двигателя"
+  test_all: "Тест всех двигателей"
+  random_motion: "Случайное движение двигателя"
+  start_moveit: "Запустить MoveIt"
+  start_moveit_standard: "Запустить стандартную версию MoveIt"
+
+  # Мониторинг двигателя
+  motor_monitor_group: "Мониторинг двигателя"
+  check_status: "Проверить состояние двигателя"
+
+  # Меню
+  menu_robot: "Робот(&R)"
+  menu_can: "CAN(&C)"
+  menu_settings: "Настройки(&S)"
+  menu_language: "Язык(L)"
+  menu_help: "Справка(H)"
+
+  # Пункты меню
+  action_add_robot: "Добавить робота"
+  action_preferences: "Параметры"
+  action_exit: "Выход"
+  action_about: "О программе"
+  action_chinese: "中文"
+  action_english: "English"
+  action_japanese: "日本語"
+  action_russian: "Русский"
+  action_clear_password: "Очистить пароль"
+  action_settings: "Настройки"
+
+  # Диалог добавления робота
+  robot_add_title: "Добавить робота"
+  robot_add_name_prompt: "Введите имя робота:"
+  robot_add_default_name: "Робот {number}"
+  robot_add_select_right: "Выбрать канал CAN правой руки"
+  robot_add_select_left: "Выбрать канал CAN левой руки"
+  robot_add_select_right_prompt: "Выберите канал CAN правой руки:"
+  robot_add_select_left_prompt: "Выберите канал CAN левой руки:"
+  robot_add_config_title: "Выбрать способ настройки"
+  robot_add_config_prompt: "Обнаружено {count} интерфейсов CAN: {interfaces}\n\nВыберите способ настройки:"
+  robot_add_auto_config: "Автоматическая настройка"
+  robot_add_manual_config: "Ручная настройка"
+  robot_add_auto_pair_info: "Будет использовано сопряжение интерфейсов CAN: {right} (правая рука) + {left} (левая рука)\n\nВведите имя робота:"
+  robot_close_confirm_title: "Подтверждение закрытия"
+  robot_close_confirm_msg: "Вы уверены, что хотите закрыть робота '{name}'?"
+
+  # Сообщения интерфейса CAN
+  can_insufficient_title: "Недостаточно интерфейсов CAN"
+  can_insufficient_msg: "Обнаружено {count} интерфейсов CAN, для управления двуруким роботом требуется минимум 2 интерфейса CAN.\n\nОбнаруженные интерфейсы: {interfaces}"
+  can_not_detected_title: "Интерфейс CAN не обнаружен"
+  can_not_detected_msg: "Интерфейс CAN не обнаружен!\n\nВозможные причины:\n1. В системе нет аппаратного устройства CAN\n2. Драйвер CAN не загружен\n3. Проверьте, подключен ли блок CAN\n\nСовет: повторите попытку после подключения блока CAN"
+  can_no_real_title: "Нет реального интерфейса CAN"
+  can_no_real_msg: "Реальные интерфейсы CAN не найдены!\n\nВсе обнаруженные интерфейсы виртуальные."
+  can_config_failed_title: "Ошибка настройки"
+  can_config_failed_msg: "Невозможно автоматически сопрячь интерфейсы CAN"
+  can_no_available_pair_title: "Нет доступной пары"
+  can_no_available_pair_msg: "Все интерфейсы CAN уже используются.\n\nИспользуйте ручную настройку или закройте существующие страницы роботов."
+  can_no_left_channel_title: "Ошибка"
+  can_no_left_channel_msg: "Нет доступного канала CAN левой руки"
+  can_config_invalid_title: "Недействительная конфигурация"
+  can_enable_success_title: "Интерфейс CAN включен"
+  can_enable_success_msg: "Успешно включено {count} интерфейсов CAN:\n{interfaces}"
+  can_enable_partial_title: "Частичный сбой включения интерфейсов"
+  can_enable_partial_msg: "Успешно включено: {success}/{total}\n\nНе удалось включить: {failed}"
+  can_enable_failed_title: "Ошибка включения интерфейса CAN"
+  can_enable_failed_msg: "Не удалось включить все интерфейсы CAN!\n\nНе удалось включить: {failed}"
+  can_enable_error_title: "Ошибка"
+  can_enable_error_msg: "Произошла ошибка при запуске интерфейса CAN:\n{error}"
+  can_disable_no_need_title: "Не требуется отключение"
+  can_disable_no_need_msg: "Включенные интерфейсы CAN не обнаружены!\n\nВозможные причины:\n1. Все интерфейсы CAN уже в состоянии DOWN\n2. В системе нет аппаратного устройства CAN"
+  can_disable_no_real_title: "Не требуется отключение"
+  can_disable_no_real_msg: "Реальные интерфейсы CAN, требующие отключения, не найдены!\n\nВсе обнаруженные интерфейсы виртуальные."
+  can_disable_success_title: "Интерфейс CAN отключен"
+  can_disable_success_msg: "Успешно отключено {count} интерфейсов CAN:\n{interfaces}"
+  can_disable_partial_title: "Частичный сбой отключения интерфейсов"
+  can_disable_partial_msg: "Успешно отключено: {success}/{total}\n\nНе удалось отключить: {failed}"
+  can_disable_failed_title: "Ошибка отключения интерфейса CAN"
+  can_disable_failed_msg: "Не удалось отключить все интерфейсы CAN!\n\nНе удалось отключить: {failed}"
+  can_disable_error_title: "Ошибка"
+  can_disable_error_msg: "Произошла ошибка при отключении интерфейса CAN:\n{error}"
+  can_status_title: "Статус CAN"
+  can_status_no_interface: "Интерфейс CAN не обнаружен"
+  password_required_title: "Требуется пароль"
+  password_required_msg: "Пожалуйста, настройте пароль sudo в настройках"
+
+  # Диалог настроек - Окно
+  settings_dialog_title: "Настройки"
+  settings_title: "Настройка путей к скриптам"
+  settings_description: "Настройте пути к скриптам запуска MoveIt"
+
+  # Диалог настроек - Группы скриптов
+  settings_sim_group: "Скрипт MoveIt для симуляции"
+  settings_can_group: "Скрипт MoveIt для реального робота (CAN)"
+  settings_script_name: "Имя файла скрипта: {script_name}"
+  settings_path_placeholder: "Выберите путь к файлу скрипта..."
+  settings_browse_button: "Обзор..."
+  settings_clear_button: "Очистить"
+  settings_status_valid: "✓ Путь действителен"
+  settings_status_no_permission: "⚠ Файл существует, но может не иметь прав на выполнение"
+  settings_status_not_exist: "✗ Путь не существует"
+
+  # Диалог настроек - Параметры пароля
+  password_config_group: "Настройка пароля Sudo"
+  password_desc: "Используется для автоматического ввода пароля sudo при включении/отключении интерфейса CAN"
+  password_placeholder: "Введите пароль sudo..."
+  password_show: "Показать"
+  password_hide: "Скрыть"
+  password_clear: "Очистить"
+  password_hint: "Примечание: Пароль будет сохранен в открытом виде в файле конфигурации, обеспечьте безопасность файла"
+
+  # Диалог первого ввода пароля
+  password_first_time_title: "Требуется пароль"
+  password_first_time_msg: "Для работы с интерфейсом CAN требуются привилегии sudo, пожалуйста, введите пароль sudo:\n\nПримечание: Пароль будет сохранен в открытом виде в файле конфигурации"
+  password_saved: "Пароль сохранен"
+  password_not_entered: "Пароль не введен, операции CAN могут не выполниться"
+
+  # Диалог настроек - Кнопки
+  settings_reset_button: "Восстановить по умолчанию"
+  settings_cancel_button: "Отмена"
+  settings_save_button: "Сохранить"
+
+  # Диалог настроек - Сообщения
+  settings_reset_confirm_title: "Подтвердить сброс"
+  settings_reset_confirm_msg: "Это восстановит все настройки в их начальную конфигурацию (включая пути к скриптам и пароль).\n\nВы уверены, что хотите продолжить?"
+  settings_reset_complete_title: "Сброс завершен"
+  settings_reset_complete_msg: "Все настройки восстановлены в начальную конфигурацию."
+  settings_incomplete_title: "Неполная конфигурация"
+  settings_incomplete_msg: "Необходимо настроить хотя бы один путь к скрипту."
+  settings_sim_path_not_exist: "Путь к скрипту симуляции не существует:\n{sim_path}"
+  settings_can_path_not_exist: "Путь к скрипту реального робота не существует:\n{can_path}"
+  settings_invalid_path_title: "Недействительный путь"
+  settings_check_path_msg: "\n\nПожалуйста, проверьте правильность пути."
+  settings_save_success_title: "Сохранено успешно"
+  settings_save_success_msg: "Конфигурация сохранена!\n\nНовые пути к скриптам и пароль вступят в силу при следующем использовании."
+  settings_save_failed_title: "Ошибка сохранения"
+  settings_save_failed_msg: "Не удалось сохранить конфигурацию, проверьте права доступа к файлу."
+  settings_select_script_title: "Выбрать файл скрипта"
+  settings_file_filter: "Скрипты Shell (*.sh);;Все файлы (*)"
+
+  # Страница приветствия
+  welcome_tab_title: "Добро пожаловать"
+  welcome_title: "Система управления несколькими роботами OpenArmX"
+  welcome_greeting: "Добро пожаловать в систему управления несколькими роботами!"
+  welcome_quick_start: "Быстрый старт:"
+  welcome_step1: "Нажмите в меню <b>Робот → Добавить робота</b>, чтобы добавить новую страницу управления роботом"
+  welcome_step2: "Нажмите в меню <b>CAN → Запустить интерфейс CAN</b>, чтобы запустить связь CAN"
+  welcome_step3: "Каждая страница робота может независимо управлять двуруким роботом"
+
+  # Страница робота
+  robot_page_info: "Правая рука:{right_channel} | Левая рука:{left_channel}"
+  robot_page_output_group: "Вывод"
+  robot_page_created: "Страница робота создана: {robot_name} (Правая:{right_channel}, Левая:{left_channel})"
+  robot_page_task_running: "Задача уже выполняется, пожалуйста, дождитесь завершения"
+  robot_page_task_start: "Запуск задачи: {task}"
+  robot_page_test_single_pending: "Функция тестирования одного двигателя ожидает реализации"
+  robot_page_cleanup: "Страница робота очищена: {robot_name}"
+
+  # Нижний колонтитул
+  footer: "Chengdu Changshu Robot Co., Ltd. | https://openarmx.com/"
+
+  # Диалог
+  about_title: "О программе"
+  about_content: |
+    Система управления двигателями OpenArmX Pro Max
+
+    Версия: 1.0
+    Автор: Вэй Линдун
+    Компания: Chengdu Changshu Robot Co., Ltd.
+    Сайт: https://openarmx.com/
+
+  # Сообщения журнала
+  log_startup: "Система успешно запущена"
+  log_waiting: "Ожидание действий пользователя..."
+  log_switch_to_russian: "Переключено на русский язык"
+  log_already_russian: "Уже на русском языке"
+
+  # Окно тестирования двигателя - Предупреждение о безопасности
+  test_motor_warning: |
+    Предупреждение о безопасности:
+    1. Перед тестированием убедитесь, что двигатель надежно закреплен и рядом нет людей.
+    2. При первых тестах используйте меньшие значения положения, скорости, крутящего момента, KP, KD (менее 10% от максимума), чтобы избежать внезапного высокоскоростного вращения.
+    3. Не превышайте максимальные параметры двигателя, чтобы предотвратить повреждение или аварийные ситуации.
+    4. При обнаружении аномалий во время тестирования немедленно остановите тест и проверьте состояние оборудования.
+    5. Использование этого инструмента означает, что вы понимаете и принимаете потенциальные риски безопасности.
+    6. При запуске устройства оператор должен держать руку над кнопкой аварийной остановки; в случае чрезвычайной ситуации немедленно нажмите ее.
+
+  # Окно тестирования двигателя - Диалог подтверждения безопасности
+  test_motor_confirm_title: "Подтверждение безопасности"
+  test_motor_confirm_message: |
+    Вы внимательно прочитали предупреждения о безопасности?
+
+    Подтвердите:
+    - Использование меньших значений скорости, крутящего момента, KP, KD
+    - Параметры не превышают 10% от максимума
+    - Понимание потенциальных рисков безопасности
+
+    После подтверждения начнется тестирование двигателя.
+
+  # Диалог тестирования одного двигателя
+  single_motor_test_title: "Тест одного двигателя - Режим MIT"
+  single_motor_safety_warning: |
+    <b><font color='red'>⚠️ Предупреждение о безопасности</font></b><br><br>
+    <b>1. Перед запуском оборудования:</b><br>
+    ✓ Убедитесь, что двигатель надежно закреплен и рядом нет людей<br>
+    ✓ Рука оператора находится над кнопкой аварийной остановки<br><br>
+    <b>2. Рекомендации по параметрам начального теста:</b><br>
+    ✓ Значения положения, скорости, крутящего момента, KP, KD должны быть менее 10% от максимума<br>
+    ✓ Избегайте внезапного высокоскоростного вращения двигателя<br><br>
+    <b>3. Во время тестирования:</b><br>
+    ✓ Не превышайте максимальные параметры двигателя<br>
+    ✓ Немедленно нажмите аварийную остановку при обнаружении аномалии<br><br>
+    <b>4. Уведомление о рисках:</b><br>
+    ✓ Использование этого инструмента означает, что вы понимаете и принимаете потенциальные риски безопасности<br>
+    ✓ Неправильная эксплуатация может привести к повреждению оборудования или травмам<br><br>
+    <font color='red'><b>Пожалуйста, внимательно прочитайте предупреждения о безопасности перед тестированием!</b></font>
+  single_motor_select_group: "Выбор двигателя"
+  single_motor_arm_label: "Рука:"
+  single_motor_right_arm: "Правая рука"
+  single_motor_left_arm: "Левая рука"
+  single_motor_motor_id_label: "ID двигателя:"
+  single_motor_mit_params: "Параметры режима MIT"
+  single_motor_position_label: "Положение (рад):"
+  single_motor_position_tooltip: "Целевое положение в радианах"
+  single_motor_velocity_label: "Скорость (рад/с):"
+  single_motor_velocity_tooltip: "Целевая скорость в радианах в секунду"
+  single_motor_torque_label: "Крутящий момент (Нм):"
+  single_motor_torque_tooltip: "Опережающий крутящий момент в ньютон-метрах"
+  single_motor_kp_label: "Kp (Коэффициент положения):"
+  single_motor_kp_tooltip: "Коэффициент положения, рекомендуемый диапазон: 0-100"
+  single_motor_kd_label: "Kd (Коэффициент скорости):"
+  single_motor_kd_tooltip: "Коэффициент скорости, рекомендуемый диапазон: 0-10"
+  single_motor_send_button: "Отправить команду"
+  single_motor_disable_button: "Отключить двигатель"
+  single_motor_confirm_title: "Подтверждение безопасности"
+  single_motor_confirm_message: |
+    <b><font color='red'>⚠ Подтверждение безопасности</font></b><br><br>
+    Вы внимательно прочитали предупреждения о безопасности?<br><br>
+    <b>Отправка команды на: {arm} Двигатель {motor_id}</b><br><br>
+    <b>Настройки параметров:</b><br>
+    Положение: {position:.3f} рад<br>
+    Скорость: {velocity:.3f} рад/с<br>
+    Крутящий момент: {torque:.3f} Нм<br>
+    Kp: {kp:.2f}<br>
+    Kd: {kd:.2f}<br><br>
+    <font color='red'><b>Подтвердите:</b><br>
+    ✓ Использование меньших значений скорости, крутящего момента, KP, KD<br>
+    ✓ Параметры не превышают 10% от максимума (начальный тест)<br>
+    ✓ Двигатель надежно закреплен и рядом нет людей<br>
+    ✓ Понимание потенциальных рисков безопасности</font>
+  single_motor_disable_title: "Подтверждение отключения"
+  single_motor_disable_confirm: "Подтвердить отключение {arm} Двигатель {motor_id}?\n\nДвигатель прекратит работу."

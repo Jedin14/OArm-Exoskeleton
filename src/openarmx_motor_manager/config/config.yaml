@@ -1,0 +1,14 @@
+default_password: ff
+default_scripts:
+  moveit_can: /home/openarmx/openarmx_ws/src/openarmx_ros2/openarmx_bimanual_moveit_config/run_bimanual_moveit_with_can2.0.sh
+  moveit_sim: /home/openarmx/openarmx_ws/src/openarmx_ros2/openarmx_bimanual_moveit_config/run_bimanual_moveit_sim.sh
+first_run: false
+language: zh_CN
+last_can_channels:
+  left: can1
+  right: can0
+scripts:
+  moveit_can: /home/openarmx/openarmx_ws/src/openarmx_ros2/openarmx_bimanual_moveit_config/run_bimanual_moveit_with_can2.0.sh
+  moveit_sim: /home/openarmx/openarmx_ws/src/openarmx_ros2/openarmx_bimanual_moveit_config/run_bimanual_moveit_sim.sh
+sudo_password: ff
+version: 2.0.0

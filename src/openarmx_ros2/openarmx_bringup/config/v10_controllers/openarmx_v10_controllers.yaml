@@ -1,0 +1,98 @@
+# OpenArmX Research and Education License
+#
+# Copyright (c) 2026 Chengdu Changshu Robot Co., Ltd.
+# https://www.openarmx.com
+#
+# This software is licensed for non-commercial research, academic,
+# and educational use only.
+# Commercial use is strictly prohibited without prior written permission.
+#
+# Redistribution for permitted non-commercial purposes must retain
+# this notice.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    forward_position_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    forward_velocity_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: position_controllers/GripperActionController
+
+forward_position_controller:
+  ros__parameters:
+    joints:
+      - openarmx_joint1
+      - openarmx_joint2
+      - openarmx_joint3
+      - openarmx_joint4
+      - openarmx_joint5
+      - openarmx_joint6
+      - openarmx_joint7
+    interface_name: position
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+
+
+forward_velocity_controller:
+  ros__parameters:
+    joints:
+      - openarmx_joint1
+      - openarmx_joint2
+      - openarmx_joint3
+      - openarmx_joint4
+      - openarmx_joint5
+      - openarmx_joint6
+      - openarmx_joint7
+    interface_name: velocity
+    command_interfaces:
+      - velocity
+    state_interfaces:
+      - velocity
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - openarmx_joint1
+      - openarmx_joint2
+      - openarmx_joint3
+      - openarmx_joint4
+      - openarmx_joint5
+      - openarmx_joint6
+      - openarmx_joint7
+
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+
+    state_publish_rate: 50.0 # Defaults to 50
+    action_monitor_rate: 50.0 # Defaults to 20
+
+    allow_partial_joints_goal: false # Defaults to false
+    constraints:
+      stopped_velocity_tolerance: 0.01 # Defaults to 0.01
+      goal_time: 0.0 # Defaults to 0.0 (start immediately)
+
+
+gripper_controller:
+  ros__parameters:
+    joint: openarmx_finger_joint1
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position

@@ -1,0 +1,15 @@
+# OpenArmX ROS2 Minimal Additional Packages
+# Contains only the essential packages required to run the robot
+
+repositories:
+  # Robot description package (URDF, meshes, xacro) - Required
+  openarmx_description:
+    type: git
+    url: git@github.com:openarmx/openarmx_description.git
+    version: 6.0_basic
+  
+  # Motor control tool
+  openarmx_can:
+    type: git
+    url: git@github.com:openarmx/openarmx_can.git
+    version: 6.0_basic
