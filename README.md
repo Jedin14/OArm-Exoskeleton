@@ -69,3 +69,4 @@ You can adjust the following parameters inside the `teleop_sim_full.launch.py` o
 - `blend_time` (default: 3.0s): Time to interpolate to the exoskeleton's first position.
 - `smooth_alpha` (default: 0.15): EMA filter coefficient (lower = smoother but slightly more latent).
 - `gripper_scaling_factor` (default: 0.05): Calibration multiplier for the physical gripper.
+# OpenArm-Exoskeleton
