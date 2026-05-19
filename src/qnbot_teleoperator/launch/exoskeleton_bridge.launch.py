@@ -81,8 +81,8 @@ def generate_launch_description():
 
     gripper_min_position_m_arg = DeclareLaunchArgument(
         'gripper_min_position_m',
-        default_value='-0.030',
-        description='夹爪最小位置（m）. 允许负值以便 gripper_close_extra_m 的过冲能传递到硬件产生闭合力'
+        default_value='0.0',
+        description='夹爪最小位置（m）'
     )
 
     gripper_max_position_m_arg = DeclareLaunchArgument(
@@ -93,8 +93,8 @@ def generate_launch_description():
 
     gripper_close_extra_m_arg = DeclareLaunchArgument(
         'gripper_close_extra_m',
-        default_value='0.025',
-        description='仅在闭合方向追加的额外闭合位移（m），用于提高闭合抓力. gripper_min_position_m 必须设为负值才能让过冲生效'
+        default_value='0.0',
+        description='已废弃: 负值过冲会导致硬件向反方向运动. 通过提高硬件 KP 实现闭合力.'
     )
 
     enable_boot_homing_arg = DeclareLaunchArgument(
