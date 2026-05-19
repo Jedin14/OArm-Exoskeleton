@@ -108,6 +108,7 @@ left_gripper_controller:
       - position
     state_interfaces:
       - position
+    max_effort: 50.0
 
 
 right_forward_position_controller:
@@ -173,3 +174,4 @@ right_gripper_controller:
       - position
     state_interfaces:
       - position
+    max_effort: 50.0
