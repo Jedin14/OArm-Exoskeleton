@@ -226,6 +226,31 @@ class ExoRetargetingNode(Node):
                 raise ValueError(f'retargeting_params.joint_limits.{side}.lower 需要为长度为7的列表')
             if not isinstance(arm_limits['upper'], list) or len(arm_limits['upper']) != 7:
                 raise ValueError(f'retargeting_params.joint_limits.{side}.upper 需要为长度为7的列表')
+
+        # 可选：输入关节补偿（用于外骨骼佩戴姿态偏置修正）
+        input_offsets_cfg = params.get('input_joint_offsets')
+        if input_offsets_cfg is not None:
+            if not isinstance(input_offsets_cfg, dict):
+                raise ValueError('retargeting_params.input_joint_offsets 必须为字典格式')
+            for side in ['left_arm', 'right_arm']:
+                if side not in input_offsets_cfg:
+                    raise ValueError(f'retargeting_params.input_joint_offsets 必须包含 {side}')
+                if not isinstance(input_offsets_cfg[side], list) or len(input_offsets_cfg[side]) != 7:
+                    raise ValueError(f'retargeting_params.input_joint_offsets.{side} 需要为长度为7的列表')
+
+        # 可选：腕部joint6/joint7二维轴同步补偿（90度旋转）
+        # 允许值：none / cw / ccw
+        wrist_sync_cfg = params.get('wrist_axis_sync_6_7')
+        if wrist_sync_cfg is not None:
+            if not isinstance(wrist_sync_cfg, dict):
+                raise ValueError('retargeting_params.wrist_axis_sync_6_7 必须为字典格式')
+            allowed = {'none', 'cw', 'ccw'}
+            for side in ['left_arm', 'right_arm']:
+                mode = wrist_sync_cfg.get(side, 'none')
+                if mode not in allowed:
+                    raise ValueError(
+                        f'retargeting_params.wrist_axis_sync_6_7.{side} 仅支持 {sorted(list(allowed))}'
+                    )
         
         self.get_logger().info('✅ 配置文件验证通过')
     
@@ -390,15 +415,9 @@ class ExoRetargetingNode(Node):
             left_gripper_raw = exo_positions[left_trigger_index] if left_trigger_index < len(exo_positions) else 0.0
             
             # 将扳机数据转换为夹爪开合程度（0.0-1.0）
-
-            lower_bound = 0.015
-            upper_bound = 0.065
-            if left_gripper_raw <= lower_bound:
-                left_gripper_position = -0.05
-            elif left_gripper_raw >= upper_bound:
-                left_gripper_position = 1.0
-            else:
-                left_gripper_position = (left_gripper_raw - lower_bound) / (upper_bound - lower_bound)
+            # 扳机数据范围是0到0.067，对应完全夹紧到完全松开
+            # 转换为标准的0.0-1.0范围（0.0=完全夹紧，1.0=完全松开）
+            left_gripper_position = max(0.0, min(1.0, left_gripper_raw / 0.067))
             
             # 每1000次处理输出一次夹爪调试信息
             if self.retargeting_stats['total_received'] % 1000 == 1:
@@ -439,15 +458,9 @@ class ExoRetargetingNode(Node):
             right_gripper_raw = exo_positions[right_trigger_index] if right_trigger_index < len(exo_positions) else 0.0
             
             # 将扳机数据转换为夹爪开合程度（0.0-1.0）
-
-            lower_bound = 0.015
-            upper_bound = 0.065
-            if right_gripper_raw <= lower_bound:
-                right_gripper_position = -0.05
-            elif right_gripper_raw >= upper_bound:
-                right_gripper_position = 1.0
-            else:
-                right_gripper_position = (right_gripper_raw - lower_bound) / (upper_bound - lower_bound)
+            # 扳机数据范围是0到0.067，对应完全夹紧到完全松开
+            # 转换为标准的0.0-1.0范围（0.0=完全夹紧，1.0=完全松开）
+            right_gripper_position = max(0.0, min(1.0, right_gripper_raw / 0.067))
             
             # 每1000次处理输出一次夹爪调试信息
             if self.retargeting_stats['total_received'] % 1000 == 1:
@@ -506,25 +519,46 @@ class ExoRetargetingNode(Node):
             offset_angles = offset_cfg.get(arm_side, [0.0] * 7)
         else:
             offset_angles = offset_cfg
+
+        # 获取输入关节补偿（默认全0）：用于在进入现有映射前修正外骨骼佩戴姿态
+        input_offsets_cfg = params.get('input_joint_offsets', {})
+        if isinstance(input_offsets_cfg, dict):
+            input_offsets = input_offsets_cfg.get(arm_side, [0.0] * 7)
+        else:
+            input_offsets = [0.0] * 7
             
         joint_limits = params['joint_limits']
         
-        # 处理关节（从start_idx开始）
+        # 先完成标量变换（缩放、偏移）
+        transformed = [0.0] * 7
         for i in range(start_idx, 7):
-            # 应用缩放和偏移
-            transformed_angle = retargeted[i] * scaling_factors[i] + offset_angles[i]
-            
-            # 应用关节限位 - 支持新的左右臂分离结构
-            if arm_side in joint_limits:
-                # 新格式：joint_limits分别为left_arm和right_arm
-                arm_limits = joint_limits[arm_side]
+            compensated_input = retargeted[i] + input_offsets[i]
+            transformed[i] = compensated_input * scaling_factors[i] + offset_angles[i]
+
+        # 可选：腕部joint6/joint7坐标系同步（二维向量旋转90度）
+        wrist_sync_cfg = params.get('wrist_axis_sync_6_7', {})
+        wrist_mode = wrist_sync_cfg.get(arm_side, 'none') if isinstance(wrist_sync_cfg, dict) else 'none'
+        if wrist_mode in ('cw', 'ccw'):
+            j6 = transformed[5]
+            j7 = transformed[6]
+            if wrist_mode == 'cw':
+                # [j6, j7] -> [j7, -j6]
+                transformed[5] = j7
+                transformed[6] = -j6
+            else:
+                # [j6, j7] -> [-j7, j6]
+                transformed[5] = -j7
+                transformed[6] = j6
+
+        # 应用关节限位 - 支持新的左右臂分离结构
+        if arm_side in joint_limits:
+            arm_limits = joint_limits[arm_side]
+            for i in range(start_idx, 7):
                 lower_limit = arm_limits['lower'][i]
                 upper_limit = arm_limits['upper'][i]
-            else:
-                raise RuntimeError("joint_limits 配置格式错误：未找到对应的左右臂分离结构，请检查配置文件。")
-            
-            clamped_angle = np.clip(transformed_angle, lower_limit, upper_limit)
-            retargeted[i] = float(clamped_angle)
+                retargeted[i] = float(np.clip(transformed[i], lower_limit, upper_limit))
+        else:
+            raise RuntimeError("joint_limits 配置格式错误：未找到对应的左右臂分离结构，请检查配置文件。")
         
         return retargeted
     

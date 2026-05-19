@@ -19,24 +19,33 @@ This package provides a complete, low-latency teleoperation stack for controllin
 
 ## 🚀 Quick Start (Run Code)
 
-A unified orchestration script `teleop_sim.sh` is provided in the `scripts/` directory to handle all workspace sourcing, automated CAN interface bring-up, and ROS 2 launch sequencing.
+A unified launcher script `openarm_teleop.sh` is provided in the workspace root to handle all workspace sourcing, background launching of the WebSocket server, retargeting, openarm bringing-up, and exoskeleton bridge.
+
+### Configure CAN Interfaces (Required for Real Hardware)
+If running on the real robot, ensure the USB-CAN adapters are connected and configure the CAN interfaces:
+```bash
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can1 type can bitrate 1000000
+sudo ip link set up can0
+sudo ip link set up can1
+```
 
 ### Run in Simulation (Fake Hardware)
 Use this mode to visualize the retargeting and teleoperation in RViz without physical hardware.
 ```bash
-./scripts/teleop_sim.sh sim
+./openarm_teleop.sh --ws-port 19191
 ```
 
 ### Run on Real Hardware
-Ensure the robot is powered on and the USB-CAN adapters are plugged in. The script will automatically bring up `can0` and `can1`.
+Ensure the robot is powered on, USB-CAN adapters are plugged in, and the CAN interfaces are configured.
 ```bash
-./scripts/teleop_sim.sh real
+./openarm_teleop.sh --real --ws-port 19191
 ```
 
 ### Connect the Exoskeleton (HMI)
-Once the launch file is running:
+Once the launcher is running:
 1. Open the **Qnbot HMI AppImage** on your network.
-2. Set the forwarding address to: `ws://localhost:19091`
+2. Set the forwarding address to: `ws://localhost:19191`
 3. Click **STOP** forwarding.
 4. Wear the exoskeleton and assume a comfortable starting position.
 5. Click **START** forwarding.
@@ -49,15 +58,14 @@ Once the launch file is running:
 
 
 1. **WebSocket Teleoperator Node**
-   Listens on port `19091` for incoming JSON packets from the Qnbot HMI containing raw joint angles.
+   Listens on port `19191` for incoming JSON packets from the Qnbot HMI containing raw joint angles.
 2. **Exo Retargeting Node**
    Translates raw exoskeleton sensor data into a physical coordinate space, mapping trigger pulls to gripper aperture sizes, complete with mechanical deadzones.
 3. **Exoskeleton Bridge Node**
-   Receives the retargeted targets. Applies safety EMA smoothing and startup positional blending. Publishes a continuous 100Hz `Float64MultiArray` to the forward position controllers.
+   Receives the retargeted targets. Seeds commands from `/joint_states`, then applies EMA smoothing and optional per-step slew limits. Publishes `Float64MultiArray` to the forward position controllers.
 
 ## Launch Parameters
 You can adjust the following parameters inside the `teleop_sim_full.launch.py` or `exoskeleton_bridge.launch.py`:
-- `blend_time` (default: 3.0s): Time to interpolate to the exoskeleton's first position.
 - `smooth_alpha` (default: 0.15): EMA filter coefficient (lower = smoother but slightly more latent).
 - `gripper_scaling_factor` (default: 0.05): Calibration multiplier for the physical gripper.
 # OpenArm-Exoskeleton

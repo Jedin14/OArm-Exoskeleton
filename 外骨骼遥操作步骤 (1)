@@ -1,0 +1,20 @@
+# 第1步：启动WebSocket遥操作服务，用于接收外骨骼数据
+ros2 launch qnbot_teleoperator websocket_teleoperator.launch.py
+
+# 第2步：启动外骨骼重定向节点，将外骨骼数据映射到OpenArm机器人
+ros2 launch qnbot_teleoperator exo_retargeting.launch.py robot_type:=OpenArm
+
+# 第3步：启动 OpenArm 硬件
+（仿真模式）
+ros2 launch openarm_bringup openarm.bimanual.launch.py arm_type:=v10 robot_controller:=forward_position_controller can_fd:=false use_fake_hardware:=true
+
+（真机模式）
+ros2 launch openarm_bringup openarm.bimanual.launch.py arm_type:=v10 robot_controller:=forward_position_controller can_fd:=false use_fake_hardware:=false
+
+# 第4步：ros2桥接控制启动
+ros2 launch qnbot_teleoperator exoskeleton_bridge.launch.py gripper_scaling_factor:=0.05
+
+
+ws://192.168.18.246:19091
+
+ws://localhost:19091

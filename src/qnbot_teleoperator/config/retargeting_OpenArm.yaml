@@ -79,6 +79,23 @@ retargeting_params:
     left_arm:  [-1.5707, -1.5707, 0.0, 1.5707, 1.5707, 0.0, 0.0]
     right_arm: [1.5707, 1.5707, 0.0, 1.5707, -1.5707, 0.0, 0.0]
 
+  # 外骨骼输入关节补偿（单位: 弧度）
+  # 目标：允许佩戴姿态变化（例如手腕/前臂旋转90度）时，保持OpenArm跟随角度行为不变
+  # joint5（索引4）：
+  # - 左臂向右旋转90° -> -pi/2 补偿
+  # - 右臂向左旋转90° -> +pi/2 补偿
+  input_joint_offsets:
+    left_arm:  [0.0, 0.0, 0.0, 0.0, -1.5708, 0.0, 0.0]
+    right_arm: [0.0, 0.0, 0.0, 0.0,  1.5708, 0.0, 0.0]
+
+  # 腕部joint6/joint7二维轴同步补偿（90度旋转）
+  # left_arm=cw:  [j6, j7] -> [ j7, -j6 ]
+  # right_arm=ccw:[j6, j7] -> [-j7,  j6 ]
+  # 作用：修正“上/下/左/右”在关节6/7上的互换与旋转错位
+  wrist_axis_sync_6_7:
+    left_arm: cw
+    right_arm: cw
+
   # 关节限位（从OpenArm v10的joint_limits.yaml配置文件获取）
   # 基于 openarm_description/config/arm/v10/joint_limits.yaml
   # 注意：joint1和joint2在双臂配置中有offset，这里已考虑
@@ -102,4 +119,3 @@ retargeting_params:
     enable_constraints: true
     max_velocity: 2.0
     max_acceleration: 5.0
-

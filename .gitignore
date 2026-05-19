@@ -1,4 +1,23 @@
+# ROS 2 build artifacts
 build/
 install/
 log/
-.ros/
+
+# VS Code directory
+.vscode/
+
+# Large binary files (GitHub has a 100MB limit)
+*.AppImage
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Core dumps
+core

@@ -25,15 +25,13 @@ setup(
             'launch/openarm_teleoperator.launch.py',
             'launch/openarm_display.launch.py',
             'launch/openarm_hardware_control.launch.py',
-            'launch/exoskeleton_bridge.launch.py',
-            'launch/teleop_sim_full.launch.py',
+            'launch/exoskeleton_bridge.launch.py'
         ]),
         # Configuration files
         ('share/' + package_name + '/config', [
             'config/qnbot_teleoperator_config.yaml',
             'config/exoskeleton_display.rviz',
-            'config/retargeting_OpenArm.yaml',
-            'config/retargeting_OpenArmX.yaml'
+            'config/retargeting_OpenArm.yaml'
         ]),
         # Kinematics chain files
         ('share/' + package_name + '/config/target', glob('config/target/*.yaml')),
