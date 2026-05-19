@@ -63,13 +63,13 @@ def generate_launch_description():
 
     gripper_smoothing_alpha_arg = DeclareLaunchArgument(
         'gripper_smoothing_alpha',
-        default_value='0.60',
+        default_value='0.30',
         description='夹爪平滑系数（0~1，越大越快）'
     )
 
     gripper_max_delta_per_sec_arg = DeclareLaunchArgument(
         'gripper_max_delta_per_sec',
-        default_value='0.080',
+        default_value='0.040',
         description='夹爪每秒最大变化（m/s），用于软开合'
     )
 
