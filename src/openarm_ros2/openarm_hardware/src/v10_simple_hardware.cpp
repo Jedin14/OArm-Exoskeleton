@@ -283,21 +283,52 @@ void OpenArm_v10HW::return_to_zero() {
   RCLCPP_INFO(rclcpp::get_logger("OpenArm_v10HW"),
               "Returning to zero position...");
 
-  // Return arm to zero with MIT control
-  std::vector<openarm::damiao_motor::MITParam> arm_params;
-  for (size_t i = 0; i < ARM_DOF; ++i) {
-    arm_params.push_back({DEFAULT_KP[i], DEFAULT_KD[i], 0.0, 0.0, 0.0});
-  }
-  openarm_->get_arm().mit_control_all(arm_params);
+  // Smoothly interpolate from current position to home to avoid startup jumps.
+  constexpr size_t kHomingSteps = 120;
+  constexpr double kHomingDurationSec = 2.4;
+  const auto step_sleep = std::chrono::microseconds(
+      static_cast<int>(kHomingDurationSec * 1e6 / static_cast<double>(kHomingSteps)));
 
-  // Return gripper to zero if enabled
-  if (hand_) {
-    openarm_->get_gripper().mit_control_all(
-        {{GRIPPER_DEFAULT_KP, GRIPPER_DEFAULT_KD, GRIPPER_JOINT_0_POSITION, 0.0,
-          0.0}});
-  }
-  std::this_thread::sleep_for(std::chrono::microseconds(1000));
+  openarm_->refresh_all();
   openarm_->recv_all();
+
+  const auto& arm_motors = openarm_->get_arm().get_motors();
+  std::vector<double> arm_start(ARM_DOF, 0.0);
+  for (size_t i = 0; i < ARM_DOF && i < arm_motors.size(); ++i) {
+    arm_start[i] = arm_motors[i].get_position();
+  }
+
+  double gripper_start_joint = GRIPPER_JOINT_0_POSITION;
+  if (hand_) {
+    const auto& gripper_motors = openarm_->get_gripper().get_motors();
+    if (!gripper_motors.empty()) {
+      gripper_start_joint = motor_radians_to_joint(gripper_motors[0].get_position());
+    }
+  }
+
+  for (size_t step = 1; step <= kHomingSteps; ++step) {
+    const double alpha = static_cast<double>(step) / static_cast<double>(kHomingSteps);
+
+    std::vector<openarm::damiao_motor::MITParam> arm_params;
+    arm_params.reserve(ARM_DOF);
+    for (size_t i = 0; i < ARM_DOF; ++i) {
+      const double target_pos = (1.0 - alpha) * arm_start[i] + alpha * 0.0;
+      arm_params.push_back(
+          {DEFAULT_KP[i], DEFAULT_KD[i], target_pos, 0.0, 0.0});
+    }
+    openarm_->get_arm().mit_control_all(arm_params);
+
+    if (hand_) {
+      const double gripper_target_joint =
+          (1.0 - alpha) * gripper_start_joint + alpha * GRIPPER_JOINT_0_POSITION;
+      const double gripper_target_motor = joint_to_motor_radians(gripper_target_joint);
+      openarm_->get_gripper().mit_control_all({{GRIPPER_DEFAULT_KP, GRIPPER_DEFAULT_KD,
+                                                gripper_target_motor, 0.0, 0.0}});
+    }
+
+    std::this_thread::sleep_for(step_sleep);
+    openarm_->recv_all();
+  }
 }
 
 // Gripper mapping helper functions
