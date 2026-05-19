@@ -38,9 +38,9 @@ class ExoskeletonBridgeNode(Node):
         self.declare_parameter('gripper_smoothing_alpha', 0.75)
         self.declare_parameter('gripper_max_delta_per_sec', 0.180)
         self.declare_parameter('gripper_action_min_period_sec', 0.01)
-        self.declare_parameter('gripper_min_position_m', -0.010)
+        self.declare_parameter('gripper_min_position_m', -0.030)
         self.declare_parameter('gripper_max_position_m', 0.050)
-        self.declare_parameter('gripper_close_extra_m', 0.0100)
+        self.declare_parameter('gripper_close_extra_m', 0.030)
         self.declare_parameter('enable_boot_homing', True)
         self.declare_parameter('boot_homing_duration_sec', 3.0)
         self.declare_parameter('boot_homing_arm_target', [0.0] * 7)
@@ -68,8 +68,8 @@ class ExoskeletonBridgeNode(Node):
         self.gripper_min_position_m = float(self.get_parameter('gripper_min_position_m').value)
         self.gripper_max_position_m = float(self.get_parameter('gripper_max_position_m').value)
         if self.gripper_max_position_m <= self.gripper_min_position_m:
-            self.get_logger().warn('Invalid gripper range, fallback to [-0.010, 0.044]')
-            self.gripper_min_position_m = -0.010
+            self.get_logger().warn('Invalid gripper range, fallback to [-0.030, 0.044]')
+            self.gripper_min_position_m = -0.030
             self.gripper_max_position_m = 0.044
         self.gripper_close_extra_m = max(0.0, float(self.get_parameter('gripper_close_extra_m').value))
         self.enable_boot_homing = bool(self.get_parameter('enable_boot_homing').value)
@@ -313,8 +313,12 @@ class ExoskeletonBridgeNode(Node):
             desired_arm = self.input_arm[side] if self.have_input[side] else self.cmd_arm[side]
             desired_gripper = self.input_gripper[side] if self.have_input[side] else self.cmd_gripper[side]
 
-            # Closing assist: add a small extra close travel to improve final grip force.
-            if desired_gripper < self.cmd_gripper[side]:
+            # Closing assist: push the target further closed whenever the gripper
+            # input is in the lower portion of its travel range (trigger squeezed).
+            # Using input position (not cmd delta) ensures the overshoot is maintained
+            # every cycle so the hardware holds force against the closed stop.
+            close_zone_m = self.gripper_max_position_m * 0.45  # lower 45 % = closing zone
+            if desired_gripper < close_zone_m:
                 desired_gripper -= self.gripper_close_extra_m
             desired_gripper = float(
                 np.clip(desired_gripper, self.gripper_min_position_m, self.gripper_max_position_m)
