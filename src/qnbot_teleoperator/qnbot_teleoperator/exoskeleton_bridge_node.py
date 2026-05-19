@@ -38,6 +38,9 @@ class ExoskeletonBridgeNode(Node):
         self.declare_parameter('gripper_smoothing_alpha', 0.75)
         self.declare_parameter('gripper_max_delta_per_sec', 0.180)
         self.declare_parameter('gripper_action_min_period_sec', 0.01)
+        self.declare_parameter('gripper_min_position_m', -0.010)
+        self.declare_parameter('gripper_max_position_m', 0.050)
+        self.declare_parameter('gripper_close_extra_m', 0.0100)
         self.declare_parameter('enable_boot_homing', True)
         self.declare_parameter('boot_homing_duration_sec', 3.0)
         self.declare_parameter('boot_homing_arm_target', [0.0] * 7)
@@ -62,6 +65,13 @@ class ExoskeletonBridgeNode(Node):
         self.gripper_action_min_period_sec = max(
             0.01, float(self.get_parameter('gripper_action_min_period_sec').value)
         )
+        self.gripper_min_position_m = float(self.get_parameter('gripper_min_position_m').value)
+        self.gripper_max_position_m = float(self.get_parameter('gripper_max_position_m').value)
+        if self.gripper_max_position_m <= self.gripper_min_position_m:
+            self.get_logger().warn('Invalid gripper range, fallback to [-0.010, 0.044]')
+            self.gripper_min_position_m = -0.010
+            self.gripper_max_position_m = 0.044
+        self.gripper_close_extra_m = max(0.0, float(self.get_parameter('gripper_close_extra_m').value))
         self.enable_boot_homing = bool(self.get_parameter('enable_boot_homing').value)
         self.boot_homing_duration_sec = max(0.2, float(self.get_parameter('boot_homing_duration_sec').value))
         self.boot_homing_arm_target = self._parse_joint_multipliers(
@@ -111,6 +121,7 @@ class ExoskeletonBridgeNode(Node):
             f'  joint_smoothing_alpha: {self.joint_smoothing_alpha}, joint_max_delta_per_sec: {self.joint_max_delta_per_sec}\n'
             f'  gripper_smoothing_alpha: {self.gripper_smoothing_alpha}, gripper_max_delta_per_sec: {self.gripper_max_delta_per_sec}\n'
             f'  gripper_threshold: {self.gripper_threshold}, gripper_action_min_period_sec: {self.gripper_action_min_period_sec}\n'
+            f'  gripper_range_m: [{self.gripper_min_position_m}, {self.gripper_max_position_m}], gripper_close_extra_m: {self.gripper_close_extra_m}\n'
             f'  enable_boot_homing: {self.enable_boot_homing}, boot_homing_duration_sec: {self.boot_homing_duration_sec}\n'
             f'  left_joint_multipliers: {self.left_joint_multipliers}\n'
             f'  right_joint_multipliers: {self.right_joint_multipliers}\n'
@@ -168,7 +179,13 @@ class ExoskeletonBridgeNode(Node):
             gripper_norm = float(np.clip(gripper_norm, 0.0, 1.0))
             if (side == 'left' and self.left_gripper_reverse) or (side == 'right' and self.right_gripper_reverse):
                 gripper_norm = 1.0 - gripper_norm
-            self.input_gripper[side] = gripper_norm * self.gripper_scale
+            self.input_gripper[side] = float(
+                np.clip(
+                    gripper_norm * self.gripper_scale,
+                    self.gripper_min_position_m,
+                    self.gripper_max_position_m
+                )
+            )
 
     def joint_states_callback(self, msg: JointState):
         index_by_name = {name: idx for idx, name in enumerate(msg.name)}
@@ -227,11 +244,14 @@ class ExoskeletonBridgeNode(Node):
 
         for side in ('left', 'right'):
             self.cmd_arm[side] = self.current_arm[side].copy()
-            self.cmd_gripper[side] = float(self.current_gripper[side])
-            self.last_gripper_sent[side] = float(self.current_gripper[side])
+            current_gripper = float(
+                np.clip(self.current_gripper[side], self.gripper_min_position_m, self.gripper_max_position_m)
+            )
+            self.cmd_gripper[side] = current_gripper
+            self.last_gripper_sent[side] = current_gripper
             self.last_gripper_sent_time[side] = now_sec
             self.boot_start_arm[side] = self.current_arm[side].copy()
-            self.boot_start_gripper[side] = float(self.current_gripper[side])
+            self.boot_start_gripper[side] = current_gripper
 
         self.boot_start_time = now_sec
         if self.enable_boot_homing:
@@ -262,11 +282,16 @@ class ExoskeletonBridgeNode(Node):
         if self.boot_phase == 'homing':
             progress = min(1.0, (now_sec - self.boot_start_time) / self.boot_homing_duration_sec)
             target_arm = np.array(self.boot_homing_arm_target, dtype=float)
-            target_gripper = float(self.boot_homing_gripper_target)
+            target_gripper = float(
+                np.clip(self.boot_homing_gripper_target, self.gripper_min_position_m, self.gripper_max_position_m)
+            )
 
             for side in ('left', 'right'):
                 desired_arm = (1.0 - progress) * self.boot_start_arm[side] + progress * target_arm
                 desired_gripper = (1.0 - progress) * self.boot_start_gripper[side] + progress * target_gripper
+                desired_gripper = float(
+                    np.clip(desired_gripper, self.gripper_min_position_m, self.gripper_max_position_m)
+                )
 
                 self.cmd_arm[side] = self._smooth_vector(
                     self.cmd_arm[side], desired_arm, self.joint_smoothing_alpha, joint_max_delta
@@ -287,6 +312,13 @@ class ExoskeletonBridgeNode(Node):
         for side in ('left', 'right'):
             desired_arm = self.input_arm[side] if self.have_input[side] else self.cmd_arm[side]
             desired_gripper = self.input_gripper[side] if self.have_input[side] else self.cmd_gripper[side]
+
+            # Closing assist: add a small extra close travel to improve final grip force.
+            if desired_gripper < self.cmd_gripper[side]:
+                desired_gripper -= self.gripper_close_extra_m
+            desired_gripper = float(
+                np.clip(desired_gripper, self.gripper_min_position_m, self.gripper_max_position_m)
+            )
 
             self.cmd_arm[side] = self._smooth_vector(
                 self.cmd_arm[side], desired_arm, self.joint_smoothing_alpha, joint_max_delta

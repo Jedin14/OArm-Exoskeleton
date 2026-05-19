@@ -79,6 +79,24 @@ def generate_launch_description():
         description='夹爪Action最小发送周期（秒）'
     )
 
+    gripper_min_position_m_arg = DeclareLaunchArgument(
+        'gripper_min_position_m',
+        default_value='-0.010',
+        description='夹爪最小位置（m）. 允许负值以便 gripper_close_extra_m 的过冲能传递到硬件产生闭合力'
+    )
+
+    gripper_max_position_m_arg = DeclareLaunchArgument(
+        'gripper_max_position_m',
+        default_value='0.044',
+        description='夹爪最大位置（m）'
+    )
+
+    gripper_close_extra_m_arg = DeclareLaunchArgument(
+        'gripper_close_extra_m',
+        default_value='0.010',
+        description='仅在闭合方向追加的额外闭合位移（m），用于提高闭合抓力. gripper_min_position_m 必须设为负值才能让过冲生效'
+    )
+
     enable_boot_homing_arg = DeclareLaunchArgument(
         'enable_boot_homing',
         default_value='true',
@@ -122,6 +140,9 @@ def generate_launch_description():
             'gripper_smoothing_alpha': LaunchConfiguration('gripper_smoothing_alpha'),
             'gripper_max_delta_per_sec': LaunchConfiguration('gripper_max_delta_per_sec'),
             'gripper_action_min_period_sec': LaunchConfiguration('gripper_action_min_period_sec'),
+            'gripper_min_position_m': LaunchConfiguration('gripper_min_position_m'),
+            'gripper_max_position_m': LaunchConfiguration('gripper_max_position_m'),
+            'gripper_close_extra_m': LaunchConfiguration('gripper_close_extra_m'),
             'enable_boot_homing': LaunchConfiguration('enable_boot_homing'),
             'boot_homing_duration_sec': LaunchConfiguration('boot_homing_duration_sec'),
             'boot_homing_arm_target': LaunchConfiguration('boot_homing_arm_target'),
@@ -142,6 +163,9 @@ def generate_launch_description():
         gripper_smoothing_alpha_arg,
         gripper_max_delta_per_sec_arg,
         gripper_action_min_period_sec_arg,
+        gripper_min_position_m_arg,
+        gripper_max_position_m_arg,
+        gripper_close_extra_m_arg,
         enable_boot_homing_arg,
         boot_homing_duration_sec_arg,
         boot_homing_arm_target_arg,
