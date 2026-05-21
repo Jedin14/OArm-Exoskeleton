@@ -92,13 +92,17 @@ class OpenArm_v10HW : public hardware_interface::SystemInterface {
 
   const std::vector<uint32_t> DEFAULT_SEND_CAN_IDS = {0x01, 0x02, 0x03, 0x04,
                                                       0x05, 0x06, 0x07};
+  // Default recv IDs with +0x10 offset (standard DM motor firmware config).
+  // Override with hardware param 'recv_can_id_offset=0' for motors where
+  // recv_id == send_id (e.g. right arm on slcand adapter).
   const std::vector<uint32_t> DEFAULT_RECV_CAN_IDS = {0x11, 0x12, 0x13, 0x14,
                                                       0x15, 0x16, 0x17};
+  uint32_t recv_can_id_offset_{0x10};  // parsed from "recv_can_id_offset" param
 
   const openarm::damiao_motor::MotorType DEFAULT_GRIPPER_MOTOR_TYPE =
       openarm::damiao_motor::MotorType::DM4310;
   const uint32_t DEFAULT_GRIPPER_SEND_CAN_ID = 0x08;
-  const uint32_t DEFAULT_GRIPPER_RECV_CAN_ID = 0x18;
+  // Gripper recv ID computed at runtime from DEFAULT_GRIPPER_SEND_CAN_ID + recv_can_id_offset_
 
   // Default gains
 //   const std::vector<double> DEFAULT_KP = {20.0, 20.0, 20.0, 20.0,

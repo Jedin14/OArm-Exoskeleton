@@ -64,10 +64,27 @@ bool OpenArm_v10HW::parse_config(const hardware_interface::HardwareInfo& info) {
   RCLCPP_INFO(rclcpp::get_logger("OpenArm_v10HW"),
               "Raw can_fd param: %s", raw_can_fd.c_str());
 
+  // Parse recv_can_id_offset (default: 0x10 = DM standard firmware)
+  // Set to 0 if motors respond at send_id (recv_id == send_id)
+  it = info.hardware_parameters.find("recv_can_id_offset");
+  if (it != info.hardware_parameters.end()) {
+    try {
+      recv_can_id_offset_ = static_cast<uint32_t>(std::stoul(it->second, nullptr, 0));
+    } catch (...) {
+      RCLCPP_WARN(rclcpp::get_logger("OpenArm_v10HW"),
+                  "Invalid recv_can_id_offset '%s', using default 0x10",
+                  it->second.c_str());
+      recv_can_id_offset_ = 0x10;
+    }
+  } else {
+    recv_can_id_offset_ = 0x10;
+  }
+
   RCLCPP_INFO(rclcpp::get_logger("OpenArm_v10HW"),
-              "Configuration: CAN=%s, arm_prefix=%s, hand=%s, can_fd=%s",
+              "Configuration: CAN=%s, arm_prefix=%s, hand=%s, can_fd=%s, recv_id_offset=0x%02X",
               can_interface_.c_str(), arm_prefix_.c_str(),
-              hand_ ? "enabled" : "disabled", can_fd_ ? "enabled" : "disabled");
+              hand_ ? "enabled" : "disabled", can_fd_ ? "enabled" : "disabled",
+              recv_can_id_offset_);
   return true;
 }
 
@@ -121,23 +138,30 @@ hardware_interface::CallbackReturn OpenArm_v10HW::on_init(
     return CallbackReturn::ERROR;
   }
 
+  // Build recv IDs at runtime using the configured offset
+  std::vector<uint32_t> recv_can_ids;
+  recv_can_ids.reserve(ARM_DOF);
+  for (uint32_t send_id : DEFAULT_SEND_CAN_IDS) {
+    recv_can_ids.push_back(send_id + recv_can_id_offset_);
+  }
+
   // Initialize OpenArm with configurable CAN-FD setting
   RCLCPP_INFO(rclcpp::get_logger("OpenArm_v10HW"),
-              "Initializing OpenArm on %s with CAN-FD %s...",
-              can_interface_.c_str(), can_fd_ ? "enabled" : "disabled");
+              "Initializing OpenArm on %s with CAN-FD %s, recv_id_offset=0x%02X...",
+              can_interface_.c_str(), can_fd_ ? "enabled" : "disabled", recv_can_id_offset_);
   openarm_ =
       std::make_unique<openarm::can::socket::OpenArm>(can_interface_, can_fd_);
 
   // Initialize arm motors with V10 defaults
   openarm_->init_arm_motors(DEFAULT_MOTOR_TYPES, DEFAULT_SEND_CAN_IDS,
-                            DEFAULT_RECV_CAN_IDS);
+                            recv_can_ids);
 
   // Initialize gripper if enabled
   if (hand_) {
     RCLCPP_INFO(rclcpp::get_logger("OpenArm_v10HW"), "Initializing gripper...");
     openarm_->init_gripper_motor(DEFAULT_GRIPPER_MOTOR_TYPE,
                                  DEFAULT_GRIPPER_SEND_CAN_ID,
-                                 DEFAULT_GRIPPER_RECV_CAN_ID);
+                                 DEFAULT_GRIPPER_SEND_CAN_ID + recv_can_id_offset_);
   }
 
   // Initialize state and command vectors based on generated joint count

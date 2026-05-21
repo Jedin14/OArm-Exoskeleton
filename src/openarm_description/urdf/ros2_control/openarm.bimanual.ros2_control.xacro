@@ -10,7 +10,10 @@
              hand:=^|false
              left_arm_prefix:=^|left_
              right_arm_prefix:=^|right_
-             can_fd:=^|true">
+             left_can_fd:=^|true
+             right_can_fd:=^|true
+             left_recv_can_id_offset:=^|16
+             right_recv_can_id_offset:=^|16">
 
     <!-- Left Arm Hardware Interface -->
     <ros2_control name="openarm_left_hardware_interface" type="system">
@@ -26,7 +29,8 @@
             <param name="can_interface">${left_can_interface}</param>
             <param name="arm_prefix">${left_arm_prefix}</param>
             <param name="hand">${hand}</param>
-            <param name="can_fd">${can_fd}</param>
+            <param name="can_fd">${left_can_fd}</param>
+            <param name="recv_can_id_offset">${left_recv_can_id_offset}</param>
           </xacro:unless>
         </hardware>
 
@@ -77,7 +81,8 @@
             <param name="can_interface">${right_can_interface}</param>
             <param name="arm_prefix">${right_arm_prefix}</param>
             <param name="hand">${hand}</param>
-            <param name="can_fd">${can_fd}</param>
+            <param name="can_fd">${right_can_fd}</param>
+            <param name="recv_can_id_offset">${right_recv_can_id_offset}</param>
           </xacro:unless>
         </hardware>
 

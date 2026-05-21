@@ -35,7 +35,10 @@
             right_can_interface:='can0'
             left_arm_prefix:='left_'
             right_arm_prefix:='right_'
-            can_fd:=true
+            left_can_fd:=true
+            right_can_fd:=true
+            left_recv_can_id_offset:=16
+            right_recv_can_id_offset:=16
             "
             >
 
@@ -98,7 +101,6 @@
         kinematics_link="${kinematics_link}"
         kinematics_offset="${kinematics_offset}" />
 
-        <!-- ros2_control hardware interfaces for bimanual setup -->
         <xacro:if value="${ros2_control}">
             <xacro:openarm_bimanual_ros2_control
             arm_type="${arm_type}"
@@ -109,7 +111,10 @@
             left_arm_prefix="${left_arm_prefix}"
             right_arm_prefix="${right_arm_prefix}"
             hand="${hand}"
-            can_fd="${can_fd}"/>
+            left_can_fd="${left_can_fd}"
+            right_can_fd="${right_can_fd}"
+            left_recv_can_id_offset="${left_recv_can_id_offset}"
+            right_recv_can_id_offset="${right_recv_can_id_offset}"/>
         </xacro:if>
 
         <xacro:if value="$(eval hand and ee_type == 'openarm_hand')">

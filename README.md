@@ -22,11 +22,25 @@ This package provides a complete, low-latency teleoperation stack for controllin
 A unified launcher script `openarm_teleop.sh` is provided in the workspace root to handle all workspace sourcing, background launching of the WebSocket server, retargeting, openarm bringing-up, and exoskeleton bridge.
 
 ### Configure CAN Interfaces (Required for Real Hardware)
-If running on the real robot, ensure the USB-CAN adapters are connected and configure the CAN interfaces:
+If running on the real robot, ensure the USB-CAN adapters are connected and configure the CAN interfaces.
+
+**Classic SocketCAN** (most USB adapters — CANable, PCAN native CAN, etc.):
 ```bash
 sudo ip link set can0 type can bitrate 1000000
-sudo ip link set can1 type can bitrate 1000000
 sudo ip link set up can0
+```
+
+**slcand (serial/USB-TTL adapters like DFRobot TEL0150)**:
+```bash
+# ⚠️  Do NOT use -o (one-shot mode). Without retransmit, the motor enable
+#    command may be dropped and motors will stay red.
+sudo slcand -c -f -s8 /dev/serial/by-id/usb-DFRobot_Can_To_TTL_TEL0150-if00 can0
+sudo ip link set can0 up
+```
+
+**CAN-FD** (only for adapters that support FD mode, e.g. PCAN USB Pro FD):
+```bash
+sudo ip link set can1 type can bitrate 1000000 dbitrate 5000000 fd on
 sudo ip link set up can1
 ```
 
@@ -36,10 +50,25 @@ Use this mode to visualize the retargeting and teleoperation in RViz without phy
 ./openarm_teleop.sh --ws-port 19191
 ```
 
-### Run on Real Hardware
-Ensure the robot is powered on, USB-CAN adapters are plugged in, and the CAN interfaces are configured.
+### Run on Real Hardware (classic SocketCAN — most setups)
+Most USB-CAN adapters (CANable, PCAN, etc.) use plain SocketCAN. Pass `--sc` with the
+interface name(s) that need classic mode:
+
 ```bash
-./openarm_teleop.sh --real --ws-port 19191
+# Both arms on plain SocketCAN adapters:
+./openarm_teleop.sh --real --sc --ws-port 19191
+
+# Mixed: can0 is a plain slcand/SocketCAN adapter, can1 is CAN-FD capable:
+./openarm_teleop.sh --real --sc can0 --ws-port 19191
+
+# Both interfaces in the comma-separated list:
+./openarm_teleop.sh --real --sc can0,can1 --ws-port 19191
+```
+
+### Run on Real Hardware (CAN-FD)
+Only use this if your adapter and firmware support CAN-FD and interfaces were configured with `fd on`:
+```bash
+./openarm_teleop.sh --real --can-fd --ws-port 19191
 ```
 
 ### Connect the Exoskeleton (HMI)

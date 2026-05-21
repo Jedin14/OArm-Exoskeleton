@@ -26,7 +26,12 @@ WS_DIR="${OPENARM_WS:-$SCRIPT_DIR}"
 USE_FAKE_HARDWARE="true"
 ARM_TYPE="v10"
 ROBOT_CONTROLLER="forward_position_controller"
-CAN_FD="false"
+RIGHT_CAN_FD="true"
+LEFT_CAN_FD="true"
+RIGHT_RECV_CAN_ID_OFFSET="16"   # 0x10 = standard DM firmware (recv_id = send_id + 16)
+LEFT_RECV_CAN_ID_OFFSET="16"
+SC_INTERFACES=""          # comma-separated list of interfaces forced to classic SocketCAN
+CAN_FD_OVERRIDE=""        # set to "true" by --can-fd to override --sc
 RIGHT_CAN="can0"
 LEFT_CAN="can1"
 CAN_BITRATE="1000000"
@@ -55,6 +60,17 @@ Usage:
 Options:
   --sim                 Use fake hardware (default, recommended first)
   --real                Use real OpenArm hardware over CAN
+  --sc                  Use classic SocketCAN for specific interfaces (disables
+                        CAN-FD on those interfaces). Most USB-CAN adapters
+                        (e.g. CANable, PCAN) use plain SocketCAN.
+                        Without an argument: disables CAN-FD on ALL interfaces.
+                        With a comma-separated list: only those interfaces use
+                        classic SocketCAN, others keep CAN-FD.
+                        Examples:
+                          --sc              (both arms: classic SocketCAN)
+                          --sc can0         (right arm: SocketCAN, left: CAN-FD)
+                          --sc can0,can1    (both arms: classic SocketCAN)
+  --can-fd              Force CAN-FD on all interfaces (overrides --sc)
   --right-can IF        Right arm CAN interface (default: can0)
   --left-can IF         Left arm CAN interface (default: can1)
   --can-bitrate N       CAN bitrate used if interfaces need setup (default: 1000000)
@@ -171,6 +187,21 @@ ensure_can_interface_ready() {
             return 1
         fi
     fi
+
+    # Warn if slcand was started with -o (one-shot / no-retransmit).
+    # In one-shot mode the enable command may not be retried if unACK'd,
+    # leaving motors permanently red even though the bus is up.
+    local slcand_cmd
+    slcand_cmd="$(ps -eo args 2>/dev/null | grep "slcand" | grep "$ifname" | grep -v grep | head -1 || true)"
+    if echo "$slcand_cmd" | grep -qw '\-o'; then
+        log "WARNING: slcand for $ifname was started with -o (one-shot mode)."
+        log "  Motors may stay red because enable frames are not retransmitted."
+        log "  Restart slcand WITHOUT -o:"
+        log "    sudo ip link set $ifname down"
+        log "    sudo killall slcand"
+        log "    sudo slcand -c -f -s8 <device> $ifname"
+        log "    sudo ip link set $ifname up"
+    fi
 }
 
 ensure_websocket_port_available() {
@@ -203,6 +234,16 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --sim) USE_FAKE_HARDWARE="true" ;;
         --real) USE_FAKE_HARDWARE="false" ;;
+        --sc)
+            # Optional next arg: comma-separated interface list (e.g. can0 or can0,can1)
+            # If next token starts with '-' or is empty, treat as "all interfaces"
+            if [[ $# -gt 1 && "${2:0:1}" != "-" ]]; then
+                SC_INTERFACES="$2"; shift
+            else
+                SC_INTERFACES="__ALL__"
+            fi
+            ;;
+        --can-fd) CAN_FD_OVERRIDE="true" ;;
         --right-can) RIGHT_CAN="${2:?--right-can requires an argument}"; shift ;;
         --left-can) LEFT_CAN="${2:?--left-can requires an argument}"; shift ;;
         --can-bitrate) CAN_BITRATE="${2:?--can-bitrate requires an argument}"; shift ;;
@@ -217,6 +258,42 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+# Resolve per-arm CAN-FD flags now that RIGHT_CAN / LEFT_CAN are final.
+# --can-fd always wins; --sc narrows which interfaces are classic SocketCAN.
+iface_is_socketcan() {
+    local iface="$1"
+    [[ -z "$SC_INTERFACES" ]] && return 1          # --sc never passed
+    [[ "$SC_INTERFACES" == "__ALL__" ]] && return 0 # --sc (no arg) → all
+    # Check if iface appears as a word in the comma-separated list
+    IFS=',' read -ra _sc_list <<< "$SC_INTERFACES"
+    for _sc_if in "${_sc_list[@]}"; do
+        [[ "${_sc_if// /}" == "$iface" ]] && return 0
+    done
+    return 1
+}
+
+if [[ -n "$CAN_FD_OVERRIDE" ]]; then
+    RIGHT_CAN_FD="true"
+    LEFT_CAN_FD="true"
+    RIGHT_RECV_CAN_ID_OFFSET="16"
+    LEFT_RECV_CAN_ID_OFFSET="16"
+else
+    if iface_is_socketcan "$RIGHT_CAN"; then
+        RIGHT_CAN_FD="false"
+        RIGHT_RECV_CAN_ID_OFFSET="0"   # motors on slcand/plain adapters use recv_id == send_id
+    else
+        RIGHT_CAN_FD="true"
+        RIGHT_RECV_CAN_ID_OFFSET="16"
+    fi
+    if iface_is_socketcan "$LEFT_CAN"; then
+        LEFT_CAN_FD="false"
+        LEFT_RECV_CAN_ID_OFFSET="0"
+    else
+        LEFT_CAN_FD="true"
+        LEFT_RECV_CAN_ID_OFFSET="16"
+    fi
+fi
 
 if [[ ! -f "$WS_DIR/install/setup.bash" ]]; then
     err "Workspace not built. Run from $WS_DIR:"
@@ -321,6 +398,7 @@ fi
 
 log "Workspace: $WS_DIR"
 log "Mode: $MODE_LABEL"
+log "CAN interfaces: right=$RIGHT_CAN ($([ "$RIGHT_CAN_FD" == "true" ] && echo 'CAN-FD' || echo 'SocketCAN'))  left=$LEFT_CAN ($([ "$LEFT_CAN_FD" == "true" ] && echo 'CAN-FD' || echo 'SocketCAN'))"
 LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 log "WebSocket (configure on exoskeleton host PC): ws://${LAN_IP}:${WEBSOCKET_PORT}"
@@ -357,7 +435,10 @@ launch_step openarm_bringup \
     ros2 launch openarm_bringup openarm.bimanual.launch.py \
     arm_type:="$ARM_TYPE" \
     robot_controller:="$ROBOT_CONTROLLER" \
-    can_fd:="$CAN_FD" \
+    right_can_fd:="$RIGHT_CAN_FD" \
+    left_can_fd:="$LEFT_CAN_FD" \
+    right_recv_can_id_offset:="$RIGHT_RECV_CAN_ID_OFFSET" \
+    left_recv_can_id_offset:="$LEFT_RECV_CAN_ID_OFFSET" \
     use_fake_hardware:="$USE_FAKE_HARDWARE" \
     right_can_interface:="$RIGHT_CAN" \
     left_can_interface:="$LEFT_CAN"

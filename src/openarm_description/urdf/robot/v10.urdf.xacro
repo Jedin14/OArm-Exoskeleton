@@ -47,7 +47,10 @@
   <xacro:arg name="left_arm_base_xyz" default="0.0 0.031 0.698" />
   <xacro:arg name="left_arm_base_rpy" default="-1.5708 0 0" />
 
-  <xacro:arg name="can_fd" default="true" />
+  <xacro:arg name="left_can_fd" default="true" />
+  <xacro:arg name="right_can_fd" default="true" />
+  <xacro:arg name="left_recv_can_id_offset" default="16" />
+  <xacro:arg name="right_recv_can_id_offset" default="16" />
 
   <xacro:openarm_robot
   arm_type="v10"
@@ -81,7 +84,10 @@
   left_arm_base_xyz="$(arg left_arm_base_xyz)"
   right_arm_base_rpy="$(arg right_arm_base_rpy)"
   left_arm_base_rpy="$(arg left_arm_base_rpy)"
-  can_fd="$(arg can_fd)"
+  left_can_fd="$(arg left_can_fd)"
+  right_can_fd="$(arg right_can_fd)"
+  left_recv_can_id_offset="$(arg left_recv_can_id_offset)"
+  right_recv_can_id_offset="$(arg right_recv_can_id_offset)"
   />
 
 </robot>

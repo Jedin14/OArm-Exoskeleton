@@ -37,16 +37,21 @@ def namespace_from_context(context, arm_prefix):
 
 
 def generate_robot_description(context: LaunchContext, description_package, description_file,
-                               arm_type, use_fake_hardware, can_fd, right_can_interface, left_can_interface):
+                               arm_type, use_fake_hardware, right_can_fd, left_can_fd,
+                               right_can_interface, left_can_interface,
+                               right_recv_can_id_offset, left_recv_can_id_offset):
     """Generate robot description using xacro processing."""
 
     description_package_str = context.perform_substitution(description_package)
     description_file_str = context.perform_substitution(description_file)
     arm_type_str = context.perform_substitution(arm_type)
     use_fake_hardware_str = context.perform_substitution(use_fake_hardware)
-    can_fd_str = context.perform_substitution(can_fd)
+    right_can_fd_str = context.perform_substitution(right_can_fd)
+    left_can_fd_str = context.perform_substitution(left_can_fd)
     right_can_interface_str = context.perform_substitution(right_can_interface)
     left_can_interface_str = context.perform_substitution(left_can_interface)
+    right_recv_can_id_offset_str = context.perform_substitution(right_recv_can_id_offset)
+    left_recv_can_id_offset_str = context.perform_substitution(left_recv_can_id_offset)
 
     xacro_path = os.path.join(
         get_package_share_directory(description_package_str),
@@ -61,9 +66,12 @@ def generate_robot_description(context: LaunchContext, description_package, desc
             "bimanual": "true",
             "use_fake_hardware": use_fake_hardware_str,
             "ros2_control": "true",
-            "can_fd": can_fd_str,
+            "right_can_fd": right_can_fd_str,
+            "left_can_fd": left_can_fd_str,
             "right_can_interface": right_can_interface_str,
             "left_can_interface": left_can_interface_str,
+            "right_recv_can_id_offset": right_recv_can_id_offset_str,
+            "left_recv_can_id_offset": left_recv_can_id_offset_str,
         }
     ).toprettyxml(indent="  ")
 
@@ -71,12 +79,16 @@ def generate_robot_description(context: LaunchContext, description_package, desc
 
 
 def robot_nodes_spawner(context: LaunchContext, description_package, description_file,
-                        arm_type, use_fake_hardware, controllers_file, can_fd, right_can_interface, left_can_interface, arm_prefix):
+                        arm_type, use_fake_hardware, controllers_file, right_can_fd, left_can_fd,
+                        right_can_interface, left_can_interface,
+                        right_recv_can_id_offset, left_recv_can_id_offset, arm_prefix):
     """Spawn both robot state publisher and control nodes with shared robot description."""
     namespace = namespace_from_context(context, arm_prefix)
 
     robot_description = generate_robot_description(
-        context, description_package, description_file, arm_type, use_fake_hardware, can_fd, right_can_interface, left_can_interface,
+        context, description_package, description_file, arm_type, use_fake_hardware,
+        right_can_fd, left_can_fd, right_can_interface, left_can_interface,
+        right_recv_can_id_offset, left_recv_can_id_offset,
     )
 
     controllers_file_str = context.perform_substitution(controllers_file)
@@ -192,9 +204,24 @@ def generate_launch_description():
             description="Controllers file(s) to use. Can be a single file or comma-separated list of files.",
         ),
         DeclareLaunchArgument(
-            "can_fd",
+            "right_can_fd",
             default_value="true",
-            description="Enable CAN-FD for both arms (true) or use classic CAN (false).",
+            description="Enable CAN-FD for the right arm (true) or use classic SocketCAN (false).",
+        ),
+        DeclareLaunchArgument(
+            "left_can_fd",
+            default_value="true",
+            description="Enable CAN-FD for the left arm (true) or use classic SocketCAN (false).",
+        ),
+        DeclareLaunchArgument(
+            "right_recv_can_id_offset",
+            default_value="16",
+            description="Recv CAN ID offset for right arm motors (16=0x10 standard DM firmware; 0 if recv_id==send_id).",
+        ),
+        DeclareLaunchArgument(
+            "left_recv_can_id_offset",
+            default_value="16",
+            description="Recv CAN ID offset for left arm motors (16=0x10 standard DM firmware; 0 if recv_id==send_id).",
         ),
     ]
 
@@ -209,7 +236,10 @@ def generate_launch_description():
     rightcan_interface = LaunchConfiguration("right_can_interface")
     left_can_interface = LaunchConfiguration("left_can_interface")
     arm_prefix = LaunchConfiguration("arm_prefix")
-    can_fd = LaunchConfiguration("can_fd")
+    right_can_fd = LaunchConfiguration("right_can_fd")
+    left_can_fd = LaunchConfiguration("left_can_fd")
+    right_recv_can_id_offset = LaunchConfiguration("right_recv_can_id_offset")
+    left_recv_can_id_offset = LaunchConfiguration("left_recv_can_id_offset")
 
     controllers_file = PathJoinSubstitution(
         [FindPackageShare(runtime_config_package), "config",
@@ -219,7 +249,9 @@ def generate_launch_description():
     robot_nodes_spawner_func = OpaqueFunction(
         function=robot_nodes_spawner,
         args=[description_package, description_file, arm_type,
-              use_fake_hardware, controllers_file, can_fd, rightcan_interface, left_can_interface, arm_prefix]
+              use_fake_hardware, controllers_file, right_can_fd, left_can_fd,
+              rightcan_interface, left_can_interface,
+              right_recv_can_id_offset, left_recv_can_id_offset, arm_prefix]
     )
 
     rviz_config_file = PathJoinSubstitution(
