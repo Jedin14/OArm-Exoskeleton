@@ -1,0 +1,11 @@
+openarm_dataset
+
+pick and place a packet from box 1 and place it in box 2
+
+main_camera
+left_camera
+right_camera
+
+view
+source ~/openarm_teleop/lelab_ui/venv/bin/activate
+lerobot-dataset-viz --repo-id JedEYE14/openarm_dataset_20260525_161611 --episode-index 0

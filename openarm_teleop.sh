@@ -11,6 +11,7 @@
 # Usage:
 #   ./openarm_teleop.sh              # simulation (default, safe)
 #   ./openarm_teleop.sh --real       # real hardware (CAN required)
+#   ./openarm_teleop.sh --lelab      # also launch leLab web UI (training/datasets)
 #   ./openarm_teleop.sh --help
 #
 # Before teleop (on the exoskeleton host PC):
@@ -44,6 +45,8 @@ ROS_DISTRO="${ROS_DISTRO:-humble}"
 PIDS=()
 LOG_DIR=""
 SKIP_WEBSOCKET_STEP="false"
+LAUNCH_LELAB="false"
+LELAB_PORT="8000"
 
 usage() {
     cat <<'EOF'
@@ -64,6 +67,8 @@ Options:
   --ws-host HOST        WebSocket bind host (default: 0.0.0.0)
   --ws-port PORT        WebSocket port (default: 19091)
   --delay SEC           Seconds between launch steps (default: 3)
+  --lelab               Also launch leLab web UI (training/dataset viewer)
+  --lelab-port PORT     leLab web UI port (default: 8000)
   -h, --help            Show this help
 
 Environment:
@@ -212,6 +217,8 @@ while [[ $# -gt 0 ]]; do
         --ws-host) WEBSOCKET_HOST="${2:?--ws-host requires an argument}"; shift ;;
         --ws-port) WEBSOCKET_PORT="${2:?--ws-port requires an argument}"; shift ;;
         --delay) STARTUP_DELAY="${2:?--delay requires an argument}"; shift ;;
+        --lelab) LAUNCH_LELAB="true" ;;
+        --lelab-port) LELAB_PORT="${2:?--lelab-port requires an argument}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) err "Unknown option: $1"; usage >&2; exit 1 ;;
     esac
@@ -328,6 +335,10 @@ log "  Same machine as ROS: ws://127.0.0.1:${WEBSOCKET_PORT}"
 log "  Cursor/VS Code port forwarding is NOT required if the exo PC is on your LAN."
 log "  Allow firewall: sudo ufw allow ${WEBSOCKET_PORT}/tcp"
 log "  After start, verify: ss -tlnp | grep ${WEBSOCKET_PORT}"
+if [[ "$LAUNCH_LELAB" == "true" ]]; then
+    log "leLab Web UI: http://${LAN_IP}:${LELAB_PORT}  (training, datasets, teleoperation)"
+    log "  Allow firewall: sudo ufw allow ${LELAB_PORT}/tcp"
+fi
 log ""
 log "Safety: stop exoskeleton data forwarding until the suit is worn correctly."
 if [[ "$USE_FAKE_HARDWARE" == "true" ]]; then
@@ -336,6 +347,22 @@ fi
 log ""
 
 ensure_websocket_port_available
+
+# Step 0 (optional): leLab web UI — training, dataset viewer, teleoperation
+LELAB_VENV="$SCRIPT_DIR/lelab_ui/venv/bin/lelab"
+if [[ "$LAUNCH_LELAB" == "true" ]]; then
+    if [[ ! -x "$LELAB_VENV" ]]; then
+        err "leLab venv not found at $LELAB_VENV"
+        err "Install it first: cd $SCRIPT_DIR/lelab_ui && python3.12 -m venv venv && venv/bin/pip install -e ."
+        exit 1
+    fi
+    log "Starting ROS 2 UDP Bridge for LeLab on port 19092 ..."
+    launch_step ros2_lelab_bridge \
+        /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/ros2_lelab_bridge.py"
+        
+    log "Starting leLab web UI on port $LELAB_PORT ..."
+    PORT="$LELAB_PORT" launch_step lelab "$LELAB_VENV"
+fi
 
 # Step 1: WebSocket teleoperator
 if [[ "$SKIP_WEBSOCKET_STEP" == "true" ]]; then
@@ -372,6 +399,9 @@ launch_step exoskeleton_bridge \
     right_gripper_reverse:="$RIGHT_GRIPPER_REVERSE"
 
 log "All components started. Press Ctrl+C to stop."
+if [[ "$LAUNCH_LELAB" == "true" ]]; then
+    log "leLab Web UI → http://${LAN_IP}:${LELAB_PORT}"
+fi
 log "Tail logs: tail -f $LOG_DIR/*.log"
 
 wait -n 2>/dev/null || wait
