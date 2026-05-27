@@ -263,6 +263,28 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 active_robot
             recording_start_time = time.time()
             current_episode = 1
+            
+            # Start background thread to poll gamepad buttons
+            def gamepad_poller():
+                last_buttons = []
+                while recording_active:
+                    if active_robot and hasattr(active_robot, 'latest_buttons'):
+                        btns = active_robot.latest_buttons
+                        if len(btns) >= 8 and len(last_buttons) >= 8:
+                            # Button A (index 5) -> exit_early (Skip to next episode / start recording)
+                            if btns[5] == 1 and last_buttons[5] == 0:
+                                handle_exit_early()
+                            # Button B (index 6) -> rerecord_episode
+                            if btns[6] == 1 and last_buttons[6] == 0:
+                                handle_rerecord_episode()
+                            # Button C (index 7) -> stop_recording
+                            if btns[7] == 1 and last_buttons[7] == 0:
+                                stop_recording()
+                        last_buttons = btns
+                    time.sleep(0.05)
+            
+            threading.Thread(target=gamepad_poller, daemon=True).start()
+
             saved_episodes = 0
 
             try:
@@ -280,7 +302,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                         "Waiting for camera resources to be released (cameras: %s)",
                         list(request.cameras.keys()),
                     )
-                    time.sleep(2.0)
+                    time.sleep(3.0)
 
                 dataset = record_with_web_events(record_config, recording_events)
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
@@ -295,6 +317,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
                 }
             except Exception as e:
+                import traceback
+                with open("/tmp/crash.log", "w") as f:
+                    traceback.print_exc(file=f)
                 logger.exception("Recording session failed")
                 current_phase = "error"
                 if recording_start_time:
@@ -468,7 +493,7 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
             "success": True,
             "dataset_repo_id": request.dataset_repo_id,
             "num_episodes": dataset.num_episodes,
-            "single_task": getattr(dataset.meta, "single_task", "Unknown task"),
+            "single_task": getattr(dataset.meta, "single_task", dataset.meta.tasks.index[0] if hasattr(dataset.meta, "tasks") and not dataset.meta.tasks.empty else "Unknown task"),
             "fps": dataset.fps,
             "features": list(dataset.features.keys()),
             "total_frames": dataset.num_frames,
@@ -600,6 +625,13 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     dataset_features = {**action_features, **obs_features}
 
     if cfg.resume:
+        if not cfg.dataset.root:
+            import os
+            from pathlib import Path
+            lerobot_home = os.environ.get("HF_LEROBOT_HOME", os.environ.get("LEROBOT_HOME", "~/.cache/huggingface/lerobot"))
+            cfg.dataset.root = Path(lerobot_home).expanduser() / cfg.dataset.repo_id
+            logger.info(f"🔧 RESUME: Set explicit local root directory path: {cfg.dataset.root}")
+
         num_cameras = len(robot.cameras) if hasattr(robot, "cameras") else 0
         dataset = LeRobotDataset.resume(
             cfg.dataset.repo_id,

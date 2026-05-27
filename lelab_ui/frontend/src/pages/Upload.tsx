@@ -17,6 +17,7 @@ import {
   AlertCircle,
   Loader2,
   Trash2,
+  Plus,
 } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 import { DatasetSource } from "@/lib/replayApi";
@@ -56,6 +57,8 @@ const Upload = () => {
 
   // Get initial dataset info from navigation state
   const initialDatasetInfo = location.state?.datasetInfo as DatasetInfo;
+  // Get original recording config to support resuming the session
+  const originalRecordingConfig = location.state?.recordingConfig as any;
 
   // State for actual dataset info (will be loaded from backend)
   const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
@@ -140,6 +143,30 @@ const Upload = () => {
     // private. Avoids passing `private` through navigation state.
     const target = `https://huggingface.co/login?next=${encodeURIComponent(spacePath)}`;
     window.open(target, "_blank", "noopener,noreferrer");
+  };
+
+  const handleResumeRecording = () => {
+    if (!datasetInfo) {
+      toast({
+        title: "Cannot Resume",
+        description: "Missing dataset information.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (originalRecordingConfig) {
+      const resumedConfig = {
+        ...originalRecordingConfig,
+        dataset_repo_id: datasetInfo.dataset_repo_id,
+        resume: true,
+      };
+      navigate("/recording", { state: { recordingConfig: resumedConfig } });
+    } else {
+      // If we don't have the original config (e.g. we picked an existing dataset from list),
+      // we navigate back to the Landing page and ask the user to pick robot/cameras.
+      navigate("/", { state: { resumeRepoId: datasetInfo.dataset_repo_id } });
+    }
   };
 
   const handlePreviewLocal = async () => {
@@ -519,6 +546,17 @@ const Upload = () => {
                       </>
                     )}
                   </Button>
+
+                  {datasetInfo && (
+                    <Button
+                      onClick={handleResumeRecording}
+                      disabled={isUploading || isPreviewing}
+                      className="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-4 px-8 text-lg"
+                    >
+                      <Plus className="w-5 h-5 mr-2" />
+                      Record More
+                    </Button>
+                  )}
 
                   <Button
                     onClick={handleUploadToHub}

@@ -44,6 +44,7 @@ interface RecordingModalProps {
   setCameras: (cameras: CameraConfig[]) => void;
   onStart: () => void;
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>;
+  isResume?: boolean;
 }
 
 const RecordingModal: React.FC<RecordingModalProps> = ({
@@ -66,6 +67,7 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   setCameras,
   onStart,
   releaseStreamsRef,
+  isResume = false,
 }) => {
   const { auth } = useHfAuth();
 
@@ -124,6 +126,14 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
               <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
                 Dataset Configuration
               </h3>
+              {isResume && (
+                <Alert className="bg-purple-950/40 border-purple-800 text-purple-100">
+                  <CheckCircle className="h-4 w-4 text-purple-400" />
+                  <AlertDescription>
+                    <strong>Resuming Dataset:</strong> You are appending new episodes to the existing local dataset <strong>{datasetName}</strong>.
+                  </AlertDescription>
+                </Alert>
+              )}
               <div className="grid grid-cols-1 gap-4">
                 <div className="space-y-2">
                   <Label
@@ -141,7 +151,8 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                       )
                     }
                     placeholder="my_dataset"
-                    className="bg-gray-800 border-gray-700 text-white"
+                    disabled={isResume}
+                    className="bg-gray-800 border-gray-700 text-white disabled:opacity-60 disabled:cursor-not-allowed"
                   />
                   <p className="text-xs text-gray-500">
                     Letters, numbers, <code>.</code> <code>_</code>{" "}

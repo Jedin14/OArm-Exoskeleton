@@ -445,6 +445,29 @@ def recording_rerecord_episode():
     return handle_rerecord_episode()
 
 
+@app.post("/stop-and-home")
+def stop_and_home():
+    """Stop all tasks and smoothly move arms to home, then shut down."""
+    import subprocess
+    import threading
+    import os
+    
+    stop_recording()
+    stop_teleoperation()
+    
+    def background_shutdown():
+        # Give the HTTP response a moment to return
+        import time
+        time.sleep(0.5)
+        # Run the homing script
+        script_path = os.path.join(os.path.dirname(__file__), "home_and_shutdown.py")
+        subprocess.run(["/usr/bin/python3", script_path])
+        
+    threading.Thread(target=background_shutdown, daemon=True).start()
+    return {"success": True, "message": "Homing arms and shutting down server..."}
+
+
+
 @app.get("/recording-camera/{cam_name}")
 def get_recording_camera(cam_name: str):
     """Return the latest JPEG frame from the active recording robot"""

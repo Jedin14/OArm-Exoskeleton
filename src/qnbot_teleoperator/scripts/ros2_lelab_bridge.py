@@ -17,7 +17,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState, Joy
 
 
 class LeLabBridgeNode(Node):
@@ -29,6 +29,7 @@ class LeLabBridgeNode(Node):
         # State storage
         self.latest_obs = {}
         self.latest_action = {}
+        self.latest_buttons = []
         self.lock = threading.Lock()
 
         # UDP Setup
@@ -40,6 +41,7 @@ class LeLabBridgeNode(Node):
         self.create_subscription(JointState, '/joint_states', self.obs_callback, 10)
         self.create_subscription(JointState, '/left_arm/joint_command', self.left_action_callback, 10)
         self.create_subscription(JointState, '/right_arm/joint_command', self.right_action_callback, 10)
+        self.create_subscription(Joy, '/exo/gamepad_keys', self.joy_callback, 10)
 
         # Broadcast Timer (100Hz)
         self.create_timer(0.01, self.broadcast_loop)
@@ -73,11 +75,16 @@ class LeLabBridgeNode(Node):
     def right_action_callback(self, msg: JointState):
         self._extract_action('right', msg)
 
+    def joy_callback(self, msg: Joy):
+        with self.lock:
+            self.latest_buttons = list(msg.buttons)
+
     def broadcast_loop(self):
         with self.lock:
             payload = {
                 "observation": self.latest_obs.copy(),
                 "action": self.latest_action.copy(),
+                "buttons": self.latest_buttons.copy(),
                 "timestamp": time.time()
             }
         

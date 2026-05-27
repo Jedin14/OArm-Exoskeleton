@@ -1,6 +1,6 @@
 openarm_dataset
 
-pick and place a packet from box 1 and place it in box 2
+pick a packet from box 1 and place it in box 2
 
 main_camera
 left_camera

@@ -200,7 +200,16 @@ const Recording = () => {
             saved_episodes: status.saved_episodes || 0,
             session_elapsed_seconds: status.session_elapsed_seconds || 0,
           };
-          navigate("/upload", { state: { datasetInfo } });
+          if (status.current_phase !== "error") {
+            navigate("/upload", { state: { datasetInfo, recordingConfig } });
+          } else {
+            toast({
+              title: "Recording Failed",
+              description: "The backend recording session encountered an error. Please check your cameras or logs and try again.",
+              variant: "destructive",
+            });
+            navigate(-1);
+          }
         }
       } catch (error) {
         console.error("Error polling recording status:", error);
@@ -517,14 +526,6 @@ const Recording = () => {
                   <RotateCcw className="w-4 h-4 mr-2" />
                   Re-record episode
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={requestStopRecording}
-                  disabled={!backendStatus.available_controls.stop_recording}
-                  className="text-red-400 focus:bg-gray-800 focus:text-red-300"
-                >
-                  <Square className="w-4 h-4 mr-2" />
-                  Stop recording
-                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -579,13 +580,26 @@ const Recording = () => {
               Recording complete — redirecting to upload…
             </p>
           )}
+
+          <div className="flex justify-center mt-8">
+            <Button
+              variant="destructive"
+              onClick={requestStopRecording}
+              disabled={!backendStatus.available_controls.stop_recording}
+              className="w-full bg-red-600/20 text-red-400 hover:bg-red-600 hover:text-white border border-red-900 font-semibold py-6 text-lg rounded-xl shadow transition-colors"
+            >
+              <Square className="w-5 h-5 mr-3" />
+              Stop & Save Dataset
+            </Button>
           </div>
+        </div>
 
           <div className="lg:col-span-2 flex flex-col gap-8">
             <RecordingCameraPreview cameras={Object.keys(recordingConfig.cameras || {})} />
             <div className="flex-1 min-h-[300px]">
               <JointGraph jointPositions={backendStatus.joint_positions} />
             </div>
+
           </div>
         </div>
       </div>

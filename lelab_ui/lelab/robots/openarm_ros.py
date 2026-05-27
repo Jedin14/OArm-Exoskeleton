@@ -89,6 +89,8 @@ class OpenArmRosRobot(Robot):
         for name in self.config.joint_names:
             self._latest_obs[f"{name}.pos"] = 0.0
             self._latest_action[f"{name}.pos"] = 0.0
+            
+        self._latest_buttons = []
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
@@ -121,6 +123,10 @@ class OpenArmRosRobot(Robot):
                 for k, v in payload.get("action", {}).items():
                     if f"{k}.pos" in self._latest_action:
                         self._latest_action[f"{k}.pos"] = v
+                        
+                # Update buttons
+                if "buttons" in payload:
+                    self._latest_buttons = payload["buttons"]
                         
             except socket.timeout:
                 pass
@@ -179,16 +185,26 @@ class OpenArmRosRobot(Robot):
         
         # Capture images from cameras and store latest frames for preview
         for cam_key, cam in self.cameras.items():
-            frame = cam.read_latest()
+            try:
+                frame = cam.read_latest(max_age_ms=2000)
+            except (TimeoutError, RuntimeError) as e:
+                logger.warning(f"Failed to read from {cam_key}, reusing previous frame. Error: {e}")
+                frame = self._latest_obs.get(cam_key, None)
+                if frame is None:
+                    # If we don't even have a first frame, we have to crash
+                    raise
+            
             obs[cam_key] = frame
+            self._latest_obs[cam_key] = frame
             
             # Encode frame as JPEG for the web preview endpoint
             if frame is not None:
                 try:
                     import cv2
-                    # frame is a numpy array (H, W, 3) BGR from OpenCV
+                    # LeRobot cameras output RGB, but cv2.imencode expects BGR.
                     if isinstance(frame, np.ndarray):
-                        _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        _, jpeg_buf = cv2.imencode('.jpg', frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
                         with self._frames_lock:
                             self._latest_frames[cam_key] = jpeg_buf.tobytes()
                 except Exception as e:
@@ -218,6 +234,10 @@ class OpenArmRosRobot(Robot):
                 clean_name = key[:-4]
                 positions[clean_name] = round(val, 4)
         return positions
+
+    @property
+    def latest_buttons(self) -> list[int]:
+        return self._latest_buttons
 
     @check_if_not_connected
     def send_action(self, action) -> dict:

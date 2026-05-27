@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { ChevronsUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
@@ -47,9 +47,25 @@ const Landing = () => {
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
 
   const releaseStreamsRef = useRef<(() => void) | null>(null);
-
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
+
+  const [isResume, setIsResume] = useState(false);
+
+  useEffect(() => {
+    if (location.state?.resumeRepoId) {
+      let name = location.state.resumeRepoId;
+      if (auth.status === "authenticated" && auth.username && name.startsWith(`${auth.username}/`)) {
+        name = name.substring(auth.username.length + 1);
+      }
+      setDatasetName(name);
+      setIsResume(true);
+      // Let the modal open in the next tick after state updates
+      setTimeout(() => openRecordingModal(), 100);
+      navigate(location.pathname, { replace: true });
+    }
+  }, [location.state, auth, navigate]);
 
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
@@ -80,9 +96,12 @@ const Landing = () => {
 
   const handleRecordingModalClose = (open: boolean) => {
     setShowRecordingModal(open);
-    if (!open && releaseStreamsRef.current) {
-      console.log("🧹 Modal closed: Releasing camera streams");
-      releaseStreamsRef.current();
+    if (!open) {
+      setIsResume(false);
+      if (releaseStreamsRef.current) {
+        console.log("🧹 Modal closed: Releasing camera streams");
+        releaseStreamsRef.current();
+      }
     }
   };
 
@@ -206,7 +225,7 @@ const Landing = () => {
       fps: 30,
       video: true,
       push_to_hub: false,
-      resume: false,
+      resume: isResume,
       streaming_encoding: streamingEncoding,
       cameras: cameraDict,
     };
@@ -309,6 +328,7 @@ const Landing = () => {
         setCameras={setCameras}
         onStart={handleStartRecording}
         releaseStreamsRef={releaseStreamsRef}
+        isResume={isResume}
       />
     </div>
   );
