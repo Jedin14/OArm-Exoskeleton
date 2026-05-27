@@ -321,6 +321,30 @@ class ExoRetargetingNode(Node):
         )
         
         self.get_logger().info('✅ ROS通信设置完成')
+
+    def _map_trigger_to_gripper(self, trigger_raw: float) -> float:
+        """
+        将外骨骼扳机原始值映射为夹爪归一化开合量 [0, 1]
+        0.0 = 完全夹紧, 1.0 = 完全松开
+        """
+        trig_cfg = self.current_robot_config.get('exo_joint_mapping', {}).get('triggers', {})
+
+        trigger_open_value = float(trig_cfg.get('open_value', 0.067))
+        trigger_close_value = float(trig_cfg.get('close_value', 0.0))
+        trigger_close_deadzone = float(trig_cfg.get('close_deadzone', 0.05))
+        trigger_open_deadzone = float(trig_cfg.get('open_deadzone', 0.0))
+
+        # 防止配置错误导致除零
+        span = max(1e-6, trigger_open_value - trigger_close_value)
+        normalized = (float(trigger_raw) - trigger_close_value) / span
+        normalized = max(0.0, min(1.0, normalized))
+
+        # 扳机端点吸附，确保“完全夹紧/完全松开”能到达端点
+        if normalized <= trigger_close_deadzone:
+            return 0.0
+        if normalized >= (1.0 - trigger_open_deadzone):
+            return 1.0
+        return normalized
     
     def exo_joint_callback(self, msg: JointState):
         """处理外骨骼关节数据回调（进程内优化版本）"""
@@ -414,10 +438,8 @@ class ExoRetargetingNode(Node):
             left_trigger_index = triggers_config['indices'][0]  # 左扳机索引14
             left_gripper_raw = exo_positions[left_trigger_index] if left_trigger_index < len(exo_positions) else 0.0
             
-            # 将扳机数据转换为夹爪开合程度（0.0-1.0）
-            # 扳机数据范围是0到0.067，对应完全夹紧到完全松开
-            # 转换为标准的0.0-1.0范围（0.0=完全夹紧，1.0=完全松开）
-            left_gripper_position = max(0.0, min(1.0, left_gripper_raw / 0.067))
+            # 将扳机数据转换为夹爪开合程度（0.0=夹紧, 1.0=松开）
+            left_gripper_position = self._map_trigger_to_gripper(left_gripper_raw)
             
             # 每1000次处理输出一次夹爪调试信息
             if self.retargeting_stats['total_received'] % 1000 == 1:
@@ -457,10 +479,8 @@ class ExoRetargetingNode(Node):
             right_trigger_index = triggers_config['indices'][1]  # 右扳机索引15
             right_gripper_raw = exo_positions[right_trigger_index] if right_trigger_index < len(exo_positions) else 0.0
             
-            # 将扳机数据转换为夹爪开合程度（0.0-1.0）
-            # 扳机数据范围是0到0.067，对应完全夹紧到完全松开
-            # 转换为标准的0.0-1.0范围（0.0=完全夹紧，1.0=完全松开）
-            right_gripper_position = max(0.0, min(1.0, right_gripper_raw / 0.067))
+            # 将扳机数据转换为夹爪开合程度（0.0=夹紧, 1.0=松开）
+            right_gripper_position = self._map_trigger_to_gripper(right_gripper_raw)
             
             # 每1000次处理输出一次夹爪调试信息
             if self.retargeting_stats['total_received'] % 1000 == 1:

@@ -39,6 +39,7 @@ RIGHT_GRIPPER_REVERSE="false"
 WEBSOCKET_HOST="0.0.0.0"
 WEBSOCKET_PORT="19091"
 STARTUP_DELAY=3
+CLEAN_START="true"
 
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 
@@ -67,6 +68,8 @@ Options:
   --ws-host HOST        WebSocket bind host (default: 0.0.0.0)
   --ws-port PORT        WebSocket port (default: 19091)
   --delay SEC           Seconds between launch steps (default: 3)
+  --clean-start         Kill previous teleop/ROS/RViz processes before launch (default)
+  --no-clean-start      Do not kill previous processes before launch
   --lelab               Also launch leLab web UI (training/dataset viewer)
   --lelab-port PORT     leLab web UI port (default: 8000)
   -h, --help            Show this help
@@ -190,8 +193,8 @@ ensure_websocket_port_available() {
         return 0
     fi
 
-    # Reuse an already-running teleoperator websocket service on the same port.
-    if echo "$listeners" | grep -q 'websocket_teleo'; then
+    # In no-clean mode we can optionally reuse an existing websocket_teleoperator.
+    if [[ "$CLEAN_START" == "false" ]] && echo "$listeners" | grep -q 'websocket_teleo'; then
         SKIP_WEBSOCKET_STEP="true"
         log "WebSocket port $WEBSOCKET_PORT already served by websocket_teleoperator; reusing it."
         return 0
@@ -202,6 +205,57 @@ ensure_websocket_port_available() {
     err "  ss -tlnp | grep :$WEBSOCKET_PORT"
     err "  kill <pid>   # or: pkill -f websocket_teleoperator"
     return 1
+}
+
+kill_matching_processes() {
+    local pattern="$1"
+    local sig="${2:-TERM}"
+    local pids pid
+
+    mapfile -t pids < <(pgrep -f "$pattern" 2>/dev/null || true)
+    for pid in "${pids[@]}"; do
+        [[ -z "$pid" ]] && continue
+        # Never kill this launcher process, its parent, or pid 1.
+        if [[ "$pid" == "$$" || "$pid" == "$PPID" || "$pid" == "1" ]]; then
+            continue
+        fi
+        kill "-$sig" "$pid" 2>/dev/null || true
+    done
+}
+
+cleanup_previous_teleop_processes() {
+    log "Clean start enabled: stopping previous OpenArm teleop/ROS/RViz processes ..."
+
+    # Target known stale processes that can conflict with controller_manager.
+    local patterns=(
+        "ros2 launch qnbot_teleoperator websocket_teleoperator.launch.py"
+        "ros2 launch qnbot_teleoperator exo_retargeting.launch.py"
+        "ros2 launch qnbot_teleoperator exoskeleton_bridge.launch.py"
+        "ros2 launch openarm_bringup openarm.bimanual.launch.py"
+        "websocket_teleoperator"
+        "exo_retargeting_node"
+        "exoskeleton_bridge_node"
+        "ros2_lelab_bridge.py"
+        "lelab"
+        "controller_manager/spawner"
+        "ros2_control_node"
+        "robot_state_publisher"
+        "joint_state_broadcaster"
+        "rviz2"
+        "openarm_teleop.sh --"
+    )
+
+    local pat
+    for pat in "${patterns[@]}"; do
+        kill_matching_processes "$pat" TERM
+    done
+    sleep 1
+    for pat in "${patterns[@]}"; do
+        kill_matching_processes "$pat" KILL
+    done
+
+    # Reset ROS graph cache to avoid stale discovery state after hard cleanup.
+    ros2 daemon stop >/dev/null 2>&1 || true
 }
 
 while [[ $# -gt 0 ]]; do
@@ -217,6 +271,8 @@ while [[ $# -gt 0 ]]; do
         --ws-host) WEBSOCKET_HOST="${2:?--ws-host requires an argument}"; shift ;;
         --ws-port) WEBSOCKET_PORT="${2:?--ws-port requires an argument}"; shift ;;
         --delay) STARTUP_DELAY="${2:?--delay requires an argument}"; shift ;;
+        --clean-start) CLEAN_START="true" ;;
+        --no-clean-start) CLEAN_START="false" ;;
         --lelab) LAUNCH_LELAB="true" ;;
         --lelab-port) LELAB_PORT="${2:?--lelab-port requires an argument}"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -255,6 +311,10 @@ if [[ "$USE_FAKE_HARDWARE" == "false" ]]; then
     ensure_openarm_hardware_plugin_registry
     ensure_can_interface_ready "$RIGHT_CAN"
     ensure_can_interface_ready "$LEFT_CAN"
+fi
+
+if [[ "$CLEAN_START" == "true" ]]; then
+    cleanup_previous_teleop_processes
 fi
 
 # colcon sometimes installs console_scripts without +x; ros2 launch requires executable bit

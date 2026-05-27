@@ -9,7 +9,7 @@ def generate_launch_description():
     # 声明启动参数
     gripper_threshold_arg = DeclareLaunchArgument(
         'gripper_threshold',
-        default_value='0.005',
+        default_value='0.0008',
         description='夹爪位置变化的最小阈值 (m)，用于减少Action请求频率'
     )
     
@@ -63,19 +63,19 @@ def generate_launch_description():
 
     gripper_smoothing_alpha_arg = DeclareLaunchArgument(
         'gripper_smoothing_alpha',
-        default_value='0.30',
+        default_value='0.55',
         description='夹爪平滑系数（0~1，越大越快）'
     )
 
     gripper_max_delta_per_sec_arg = DeclareLaunchArgument(
         'gripper_max_delta_per_sec',
-        default_value='0.040',
+        default_value='0.120',
         description='夹爪每秒最大变化（m/s），用于软开合'
     )
 
     gripper_action_min_period_sec_arg = DeclareLaunchArgument(
         'gripper_action_min_period_sec',
-        default_value='0.03',
+        default_value='0.01',
         description='夹爪Action最小发送周期（秒）'
     )
 
@@ -172,4 +172,3 @@ def generate_launch_description():
         boot_homing_gripper_target_arg,
         bridge_node
     ])
-

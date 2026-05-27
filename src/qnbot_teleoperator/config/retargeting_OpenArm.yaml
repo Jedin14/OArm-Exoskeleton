@@ -41,6 +41,14 @@ exo_joint_mapping:
   triggers:
     joint_names: ['left_trigger_joint', 'right_trigger_joint']
     indices: [14, 15]
+    # 扳机标定:
+    # open_value  : 扳机松开时（夹爪张开）典型值
+    # close_value : 扳机压到底时（夹爪夹紧）典型值
+    # close_deadzone: 小于该归一化阈值时强制吸附到0.0，避免夹爪留缝
+    open_value: 0.067
+    close_value: 0.0025
+    close_deadzone: 0.06
+    open_deadzone: 0.00
 
 # 目标机器人（OpenArm）关节名称（URDF）
 # OpenArm使用7自由度手臂：joint1-joint7
