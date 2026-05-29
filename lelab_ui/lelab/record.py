@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import re
 import shutil
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -85,6 +87,101 @@ class UploadRequest(BaseModel):
 
 class DatasetInfoRequest(BaseModel):
     dataset_repo_id: str
+
+
+def _extract_camera_names_from_features(features: list[str]) -> list[str]:
+    """Extract logical camera names from LeRobot feature keys.
+
+    Example feature key:
+      observation.images.main_camera
+    -> camera name:
+      main_camera
+    """
+    names: list[str] = []
+    prefix = "observation.images."
+    for feat in features:
+        if not feat.startswith(prefix):
+            continue
+        cam_name = feat[len(prefix) :]
+        if cam_name and cam_name not in names:
+            names.append(cam_name)
+    return names
+
+
+def _resolve_local_dataset_dir(repo_id: str) -> Path | None:
+    """Resolve a local LeRobot dataset directory for a repo_id.
+
+    Supports:
+    - <HF_LEROBOT_HOME>/<repo_id>
+    - one-level nested layouts where a folder contains another same-named folder
+      produced by some zip extraction flows.
+    """
+    from lerobot.utils.constants import HF_LEROBOT_HOME
+
+    root = Path(HF_LEROBOT_HOME).expanduser()
+    direct = root / repo_id
+    info = direct / "meta" / "info.json"
+    if info.is_file():
+        return direct
+
+    nested = direct / repo_id.split("/")[-1]
+    info_nested = nested / "meta" / "info.json"
+    if info_nested.is_file():
+        return nested
+
+    # Fallback scan (same depth policy as dataset listing).
+    parts = repo_id.split("/")
+    candidates: list[Path] = []
+    if len(parts) == 2:
+        candidates.append(root / parts[0] / parts[1])
+    else:
+        candidates.append(root / parts[0])
+
+    for c in candidates:
+        if (c / "meta" / "info.json").is_file():
+            return c
+        c2 = c / c.name
+        if (c2 / "meta" / "info.json").is_file():
+            return c2
+    return None
+
+
+def _load_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
+    """Load dataset summary from local meta files without Hub access."""
+    ds_dir = _resolve_local_dataset_dir(repo_id)
+    if ds_dir is None:
+        return None
+
+    info_path = ds_dir / "meta" / "info.json"
+    tasks_path = ds_dir / "meta" / "tasks.jsonl"
+    try:
+        raw = json.loads(info_path.read_text(encoding="utf-8"))
+        feature_keys = list((raw.get("features") or {}).keys())
+        single_task = "Unknown task"
+        if tasks_path.is_file():
+            for line in tasks_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                task_obj = json.loads(line)
+                single_task = task_obj.get("task", single_task)
+                if single_task:
+                    break
+
+        return {
+            "success": True,
+            "dataset_repo_id": repo_id,
+            "num_episodes": int(raw.get("total_episodes", 0)),
+            "single_task": single_task,
+            "fps": raw.get("fps"),
+            "features": feature_keys,
+            "camera_names": _extract_camera_names_from_features(feature_keys),
+            "total_frames": int(raw.get("total_frames", 0)),
+            "robot_type": raw.get("robot_type", "Unknown robot"),
+        }
+    except Exception as e:
+        logger.warning(f"Failed reading local dataset metadata for {repo_id}: {e}")
+        return None
 
 
 def create_record_config(request: RecordingRequest) -> RecordConfig:
@@ -306,13 +403,15 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
 
                 dataset = record_with_web_events(record_config, recording_events)
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
+                features = list(dataset.features.keys())
                 last_recording_info = {
                     "success": True,
                     "dataset_repo_id": request.dataset_repo_id,
                     "num_episodes": dataset.num_episodes,
                     "single_task": request.single_task,
                     "fps": dataset.fps,
-                    "features": list(dataset.features.keys()),
+                    "features": features,
+                    "camera_names": _extract_camera_names_from_features(features),
                     "total_frames": dataset.num_frames,
                     "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
                 }
@@ -485,17 +584,25 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
     if last_recording_info and last_recording_info.get("dataset_repo_id") == request.dataset_repo_id:
         return last_recording_info
 
+    # Prefer direct local metadata load to avoid accidental Hub 404s in
+    # mixed local-only / private-repo setups.
+    local_info = _load_local_dataset_info(request.dataset_repo_id)
+    if local_info is not None:
+        return local_info
+
     try:
         from lerobot.datasets import LeRobotDataset
 
         dataset = LeRobotDataset(request.dataset_repo_id)
+        features = list(dataset.features.keys())
         return {
             "success": True,
             "dataset_repo_id": request.dataset_repo_id,
             "num_episodes": dataset.num_episodes,
             "single_task": getattr(dataset.meta, "single_task", dataset.meta.tasks.index[0] if hasattr(dataset.meta, "tasks") and not dataset.meta.tasks.empty else "Unknown task"),
             "fps": dataset.fps,
-            "features": list(dataset.features.keys()),
+            "features": features,
+            "camera_names": _extract_camera_names_from_features(features),
             "total_frames": dataset.num_frames,
             "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
         }

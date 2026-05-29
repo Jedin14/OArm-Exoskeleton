@@ -17,6 +17,7 @@ import { useDatasets } from "@/hooks/useDatasets";
 import { DatasetItem } from "@/lib/replayApi";
 import { CameraConfig } from "@/components/recording/CameraConfiguration";
 import { isHostedSpace } from "@/lib/isHostedSpace";
+import { useApi } from "@/contexts/ApiContext";
 
 const ON_SPACE = isHostedSpace();
 
@@ -50,22 +51,42 @@ const Landing = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
+  const { baseUrl, fetchWithHeaders } = useApi();
 
   const [isResume, setIsResume] = useState(false);
+  const [resumeCameraNames, setResumeCameraNames] = useState<string[]>([]);
 
   useEffect(() => {
-    if (location.state?.resumeRepoId) {
-      let name = location.state.resumeRepoId;
+    const resumeRepoId = location.state?.resumeRepoId;
+    if (resumeRepoId) {
+      let name = resumeRepoId;
       if (auth.status === "authenticated" && auth.username && name.startsWith(`${auth.username}/`)) {
         name = name.substring(auth.username.length + 1);
       }
       setDatasetName(name);
       setIsResume(true);
-      // Let the modal open in the next tick after state updates
-      setTimeout(() => openRecordingModal(), 100);
-      navigate(location.pathname, { replace: true });
+      (async () => {
+        try {
+          const response = await fetchWithHeaders(`${baseUrl}/dataset-info`, {
+            method: "POST",
+            body: JSON.stringify({ dataset_repo_id: resumeRepoId }),
+          });
+          const data = await response.json();
+          if (response.ok && data.success && Array.isArray(data.camera_names)) {
+            setResumeCameraNames(data.camera_names);
+          } else {
+            setResumeCameraNames([]);
+          }
+        } catch {
+          setResumeCameraNames([]);
+        } finally {
+          // Let the modal open in the next tick after state updates
+          setTimeout(() => openRecordingModal(), 100);
+          navigate(location.pathname, { replace: true });
+        }
+      })();
     }
-  }, [location.state, auth, navigate]);
+  }, [location.state, auth, navigate, baseUrl, fetchWithHeaders]);
 
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
@@ -98,6 +119,7 @@ const Landing = () => {
     setShowRecordingModal(open);
     if (!open) {
       setIsResume(false);
+      setResumeCameraNames([]);
       if (releaseStreamsRef.current) {
         console.log("🧹 Modal closed: Releasing camera streams");
         releaseStreamsRef.current();
@@ -329,6 +351,7 @@ const Landing = () => {
         onStart={handleStartRecording}
         releaseStreamsRef={releaseStreamsRef}
         isResume={isResume}
+        previousCameraNames={resumeCameraNames}
       />
     </div>
   );

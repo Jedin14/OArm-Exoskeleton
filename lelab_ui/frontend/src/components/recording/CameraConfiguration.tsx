@@ -30,12 +30,14 @@ interface CameraConfigurationProps {
   cameras: CameraConfig[];
   onCamerasChange: (cameras: CameraConfig[]) => void;
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>; // Ref to expose stream release function
+  suggestedCameraNames?: string[];
 }
 
 const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   cameras,
   onCamerasChange,
   releaseStreamsRef,
+  suggestedCameraNames = [],
 }) => {
   const { toast } = useToast();
 
@@ -45,6 +47,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   } = useAvailableCameras();
   const [selectedCameraIndex, setSelectedCameraIndex] = useState<string>("");
   const [cameraName, setCameraName] = useState("");
+  const [selectedSuggestedName, setSelectedSuggestedName] = useState<string>("");
 
   // cv2's AVFoundation order is uniqueID-sorted, so plugging/unplugging a
   // device between sessions shifts indices. The browser device_id stays
@@ -126,6 +129,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
     setSelectedCameraIndex("");
     setCameraName("");
+    setSelectedSuggestedName("");
 
     toast({
       title: "Camera Added",
@@ -223,6 +227,26 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
             <Label className="text-sm font-medium text-gray-300">
               Camera Name
             </Label>
+            {suggestedCameraNames.length > 0 && (
+              <Select
+                value={selectedSuggestedName}
+                onValueChange={(value) => {
+                  setSelectedSuggestedName(value);
+                  setCameraName(value);
+                }}
+              >
+                <SelectTrigger className="bg-gray-800 border-gray-700 text-white mb-2">
+                  <SelectValue placeholder="Use previous-run camera name" />
+                </SelectTrigger>
+                <SelectContent className="bg-gray-800 border-gray-700">
+                  {suggestedCameraNames.map((name) => (
+                    <SelectItem key={name} value={name} className="text-white hover:bg-gray-700">
+                      {name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Input
               value={cameraName}
               onChange={(e) => setCameraName(e.target.value)}
