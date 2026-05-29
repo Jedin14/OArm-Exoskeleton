@@ -28,9 +28,11 @@ USE_FAKE_HARDWARE="true"
 ARM_TYPE="v10"
 ROBOT_CONTROLLER="forward_position_controller"
 CAN_FD="false"
+USE_WAVESHARE="false"
 RIGHT_CAN="can0"
 LEFT_CAN="can1"
 CAN_BITRATE="1000000"
+CAN_DATA_BITRATE="5000000"
 GRIPPER_SCALING="0.05"
 LEFT_JOINT_MULTIPLIERS='[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]'
 RIGHT_JOINT_MULTIPLIERS='[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]'
@@ -59,9 +61,12 @@ Usage:
 Options:
   --sim                 Use fake hardware (default, recommended first)
   --real                Use real OpenArm hardware over CAN
+  --can                 Alias for --real (requested hardware mode)
+  --waveshare           Configure SocketCAN as Waveshare USB-CAN-FD-B
   --right-can IF        Right arm CAN interface (default: can0)
   --left-can IF         Left arm CAN interface (default: can1)
   --can-bitrate N       CAN bitrate used if interfaces need setup (default: 1000000)
+  --can-data-bitrate N  CAN-FD data bitrate for Waveshare mode (default: 5000000)
   --gripper-scale F     Gripper scaling factor (default: 0.05)
   --invert-left-j6-j7   Multiply left joint6/joint7 commands by -1
   --reverse-left-grip   Reverse left gripper command (x -> 1-x)
@@ -181,6 +186,62 @@ ensure_can_interface_ready() {
     fi
 }
 
+ensure_waveshare_ready() {
+    local ifname="$1"
+    local type_out
+
+    if ! ip link show "$ifname" >/dev/null 2>&1; then
+        err "Waveshare CAN interface '$ifname' does not exist."
+        err "Install and load the Waveshare driver first so Linux creates can0/can1."
+        return 1
+    fi
+
+    if ! run_privileged ip link set "$ifname" down; then
+        err "Failed to bring '$ifname' down before CAN-FD config."
+        return 1
+    fi
+
+    if ! run_privileged ip link set "$ifname" type can bitrate "$CAN_BITRATE" dbitrate "$CAN_DATA_BITRATE" fd on; then
+        err "Failed to configure CAN-FD on '$ifname'."
+        err "Try manually:"
+        err "  sudo ip link set $ifname type can bitrate $CAN_BITRATE dbitrate $CAN_DATA_BITRATE fd on"
+        return 1
+    fi
+
+    if ! run_privileged ip link set "$ifname" up; then
+        err "Failed to bring '$ifname' up after CAN-FD config."
+        return 1
+    fi
+
+    type_out="$(ip -details link show "$ifname" 2>/dev/null || true)"
+    if ! grep -q "fd" <<<"$type_out"; then
+        err "Interface '$ifname' is up but CAN-FD mode was not detected."
+        return 1
+    fi
+}
+
+maybe_fallback_to_vcan() {
+    # For development: if real CAN is unavailable but VCAN exists, switch interfaces.
+    if ip link show "$RIGHT_CAN" >/dev/null 2>&1 && ip link show "$LEFT_CAN" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ip link show vcan0 >/dev/null 2>&1; then
+        RIGHT_CAN="vcan0"
+    fi
+    if ip link show vcan1 >/dev/null 2>&1; then
+        LEFT_CAN="vcan1"
+    elif [[ "$RIGHT_CAN" == "vcan0" ]]; then
+        LEFT_CAN="vcan0"
+    fi
+
+    if [[ "$RIGHT_CAN" == vcan* && "$LEFT_CAN" == vcan* ]]; then
+        log "CAN interfaces not found; falling back to VCAN ($RIGHT_CAN, $LEFT_CAN)."
+        log "VCAN mode is for software pipeline testing only (no physical motor communication)."
+        return 0
+    fi
+}
+
 ensure_websocket_port_available() {
     local listeners
 
@@ -262,9 +323,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --sim) USE_FAKE_HARDWARE="true" ;;
         --real) USE_FAKE_HARDWARE="false" ;;
+        --can) USE_FAKE_HARDWARE="false" ;;
+        --waveshare) USE_WAVESHARE="true" ;;
         --right-can) RIGHT_CAN="${2:?--right-can requires an argument}"; shift ;;
         --left-can) LEFT_CAN="${2:?--left-can requires an argument}"; shift ;;
         --can-bitrate) CAN_BITRATE="${2:?--can-bitrate requires an argument}"; shift ;;
+        --can-data-bitrate) CAN_DATA_BITRATE="${2:?--can-data-bitrate requires an argument}"; shift ;;
         --gripper-scale) GRIPPER_SCALING="${2:?--gripper-scale requires an argument}"; shift ;;
         --invert-left-j6-j7) LEFT_JOINT_MULTIPLIERS='[1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0]' ;;
         --reverse-left-grip) LEFT_GRIPPER_REVERSE="true" ;;
@@ -309,8 +373,14 @@ done
 
 if [[ "$USE_FAKE_HARDWARE" == "false" ]]; then
     ensure_openarm_hardware_plugin_registry
-    ensure_can_interface_ready "$RIGHT_CAN"
-    ensure_can_interface_ready "$LEFT_CAN"
+    maybe_fallback_to_vcan
+    if [[ "$USE_WAVESHARE" == "true" ]]; then
+        ensure_waveshare_ready "$RIGHT_CAN"
+        ensure_waveshare_ready "$LEFT_CAN"
+    else
+        ensure_can_interface_ready "$RIGHT_CAN"
+        ensure_can_interface_ready "$LEFT_CAN"
+    fi
 fi
 
 if [[ "$CLEAN_START" == "true" ]]; then

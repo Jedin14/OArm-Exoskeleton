@@ -30,6 +30,29 @@ sudo ip link set up can0
 sudo ip link set up can1
 ```
 
+### Waveshare USB-CAN-FD-B -> OpenArm Setup
+OpenArm uses SocketCAN (`can0`/`can1`), so hardware type does not change OpenArm code. The Waveshare adapter works once Linux exposes SocketCAN interfaces.
+
+1. Install/load the Waveshare Linux driver so the adapter creates `can0`/`can1`.
+2. Verify interfaces exist:
+```bash
+ip link show can0
+ip link show can1
+```
+3. Run teleop in Waveshare CAN-FD mode:
+```bash
+./openarm_teleop.sh --real --can --waveshare --ws-port 19191 --lelab
+```
+4. Optional custom rates (Waveshare default FD data path is 5 Mbps):
+```bash
+./openarm_teleop.sh --real --can --waveshare --can-bitrate 1000000 --can-data-bitrate 5000000 --ws-port 19191
+```
+
+Notes:
+- `--can` is an alias of `--real`.
+- `--waveshare` enables CAN-FD interface configuration (`fd on`, `dbitrate`).
+- Without `--waveshare`, launcher uses normal SocketCAN setup (existing behavior for PEAK/SavvyCAN-style setups).
+
 ### Run in Simulation (Fake Hardware)
 Use this mode to visualize the retargeting and teleoperation in RViz without physical hardware.
 ```bash
