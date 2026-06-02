@@ -76,6 +76,8 @@ const Upload = () => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
+  const [previewMode, setPreviewMode] = useState<"all" | "episode">("all");
+  const [previewEpisodeIndex, setPreviewEpisodeIndex] = useState("0");
 
   // Load actual dataset information from backend
   React.useEffect(() => {
@@ -171,32 +173,26 @@ const Upload = () => {
 
   const handlePreviewLocal = async () => {
     if (!datasetInfo) return;
-    setIsPreviewing(true);
-    try {
-      const response = await fetchWithHeaders(`${baseUrl}/start-visualizer`, {
-        method: "POST",
-        body: JSON.stringify({ dataset_repo_id: datasetInfo.dataset_repo_id }),
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        // Open the visualizer in a new tab
-        window.open(data.url, "_blank", "noopener,noreferrer");
-      } else {
+    if (previewMode === "episode") {
+      const idx = Number.parseInt(previewEpisodeIndex, 10);
+      const maxEpisodeIdx = Math.max(0, (datasetInfo.num_episodes || 1) - 1);
+      if (Number.isNaN(idx) || idx < 0 || idx > maxEpisodeIdx) {
         toast({
-          title: "Preview Failed",
-          description: "Could not start the visualizer.",
+          title: "Invalid episode index",
+          description: `Select an episode index between 0 and ${maxEpisodeIdx}.`,
           variant: "destructive",
         });
+        return;
       }
-    } catch (error) {
-      toast({
-        title: "Connection Error",
-        description: "Could not connect to the backend server.",
-        variant: "destructive",
-      });
-    } finally {
-      setIsPreviewing(false);
     }
+    navigate({
+      pathname: "/dataset-preview",
+      search: `?dataset=${encodeURIComponent(datasetInfo.dataset_repo_id)}&mode=${previewMode}&episode=${
+        previewMode === "episode"
+          ? Number.parseInt(previewEpisodeIndex, 10)
+          : 0
+      }`,
+    });
   };
 
   const formatDuration = (seconds: number): string => {
@@ -529,6 +525,31 @@ const Upload = () => {
                 </Button>
               ) : (
                 <>
+                  <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2">
+                    <select
+                      value={previewMode}
+                      onChange={(e) =>
+                        setPreviewMode(e.target.value as "all" | "episode")
+                      }
+                      disabled={isPreviewing || isUploading}
+                      className="h-12 rounded-md border border-gray-600 bg-gray-800 px-3 text-sm text-white"
+                    >
+                      <option value="all">Preview whole dataset</option>
+                      <option value="episode">Preview single episode</option>
+                    </select>
+                    {previewMode === "episode" && (
+                      <Input
+                        type="number"
+                        min={0}
+                        max={Math.max(0, (datasetInfo?.num_episodes || 1) - 1)}
+                        value={previewEpisodeIndex}
+                        onChange={(e) => setPreviewEpisodeIndex(e.target.value)}
+                        disabled={isPreviewing || isUploading}
+                        placeholder="Episode index"
+                        className="h-12 w-full sm:w-44 bg-gray-800 border-gray-600 text-white"
+                      />
+                    )}
+                  </div>
                   <Button
                     onClick={handlePreviewLocal}
                     disabled={isPreviewing || isUploading}

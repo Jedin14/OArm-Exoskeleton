@@ -23,6 +23,13 @@ import CameraConfiguration, {
 } from "@/components/recording/CameraConfiguration";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { RobotRecord } from "@/hooks/useRobots";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface RecordingModalProps {
   open: boolean;
@@ -46,6 +53,9 @@ interface RecordingModalProps {
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>;
   isResume?: boolean;
   previousCameraNames?: string[];
+  taskOptions: string[];
+  onAddTaskOption: (task: string) => void;
+  onDeleteTaskOption: (task: string) => void;
 }
 
 const RecordingModal: React.FC<RecordingModalProps> = ({
@@ -70,6 +80,9 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   releaseStreamsRef,
   isResume = false,
   previousCameraNames = [],
+  taskOptions,
+  onAddTaskOption,
+  onDeleteTaskOption,
 }) => {
   const { auth } = useHfAuth();
 
@@ -182,13 +195,73 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                   >
                     Task Description *
                   </Label>
-                  <Input
-                    id="singleTask"
-                    value={singleTask}
-                    onChange={(e) => setSingleTask(e.target.value)}
-                    placeholder="e.g., pick up the red block and place it on the blue square"
-                    className="bg-gray-800 border-gray-700 text-white"
-                  />
+                  <Select value={singleTask} onValueChange={setSingleTask}>
+                    <SelectTrigger className="bg-gray-800 border-gray-700 text-white">
+                      <SelectValue placeholder="Select task" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-gray-800 border-gray-700">
+                      {taskOptions.map((task) => (
+                        <SelectItem key={task} value={task} className="text-white hover:bg-gray-700">
+                          {task}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <div className="flex gap-2">
+                    <Input
+                      id="singleTask"
+                      value={singleTask}
+                      onChange={(e) => setSingleTask(e.target.value)}
+                      placeholder="Type task and click Add"
+                      className="bg-gray-800 border-gray-700 text-white"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="border-gray-600 text-gray-200 hover:bg-gray-800"
+                      onClick={() => onAddTaskOption(singleTask)}
+                    >
+                      Add
+                    </Button>
+                  </div>
+                  {taskOptions.length > 0 && (
+                    <div className="space-y-2">
+                      {taskOptions.map((task) => (
+                        <div
+                          key={task}
+                          className="flex items-center justify-between rounded border border-gray-700 bg-gray-800/60 px-3 py-2"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setSingleTask(task)}
+                            className="text-left text-sm text-gray-200 hover:text-white"
+                          >
+                            {task}
+                          </button>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="border-gray-600 text-gray-200 hover:bg-gray-700"
+                              onClick={() => onAddTaskOption(task)}
+                            >
+                              Add
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="border-red-600 text-red-300 hover:bg-red-900/30"
+                              onClick={() => onDeleteTaskOption(task)}
+                            >
+                              Delete
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <Label

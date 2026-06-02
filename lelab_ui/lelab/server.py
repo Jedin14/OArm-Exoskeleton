@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -28,7 +29,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -49,6 +50,8 @@ from .record import (
     DatasetInfoRequest,
     RecordingRequest,
     UploadRequest,
+    SetEpisodeTaskRequest,
+    _resolve_local_dataset_dir,
     handle_delete_dataset,
     handle_exit_early,
     handle_get_dataset_info,
@@ -107,6 +110,9 @@ from .utils.system import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_CHUNK_RE = re.compile(r"chunk-(\d+)")
+_FILE_RE = re.compile(r"file-(\d+)\.mp4$")
+
 
 class StartTrainingBody(BaseModel):
     """Wrapping body for POST /jobs/training. Adds optional target spec."""
@@ -123,6 +129,40 @@ class StartTrainingBody(BaseModel):
             return cls.model_validate(raw)
         # Legacy: top-level training fields, no target.
         return cls(config=TrainingRequest.model_validate(raw))
+
+
+class StartVisualizerRequest(BaseModel):
+    dataset_repo_id: str
+    episode_index: int | None = None
+
+
+def _video_sort_key(path: Path) -> tuple[int, int]:
+    chunk_match = _CHUNK_RE.search(str(path.parent))
+    file_match = _FILE_RE.search(path.name)
+    chunk = int(chunk_match.group(1)) if chunk_match else 0
+    file_idx = int(file_match.group(1)) if file_match else 0
+    return (chunk, file_idx)
+
+
+def _dataset_video_index(repo_id: str) -> dict[str, list[Path]] | None:
+    ds_dir = _resolve_local_dataset_dir(repo_id)
+    if ds_dir is None:
+        return None
+    videos_root = ds_dir / "videos"
+    if not videos_root.is_dir():
+        return None
+
+    index: dict[str, list[Path]] = {}
+    for camera_dir in sorted(videos_root.iterdir()):
+        if not camera_dir.is_dir():
+            continue
+        camera_name = camera_dir.name
+        if camera_name.startswith("observation.images."):
+            camera_name = camera_name.removeprefix("observation.images.")
+        files = sorted(camera_dir.glob("chunk-*/*.mp4"), key=_video_sort_key)
+        if files:
+            index[camera_name] = files
+    return index or None
 
 
 # Cache for HF Jobs hardware flavors (5-minute TTL)
@@ -433,6 +473,18 @@ def recording_status():
     return handle_recording_status()
 
 
+@app.post("/set-episode-task")
+def set_episode_task(request: SetEpisodeTaskRequest):
+    """Update the task for the currently recording episode."""
+    from lelab.record import recording_active, recording_events
+    if not recording_active or recording_events is None:
+        return {"success": False, "message": "No recording session is active"}
+    
+    recording_events["current_task"] = request.task
+    logger.info(f"Updated current episode task to: {request.task}")
+    return {"success": True, "task": request.task}
+
+
 @app.post("/recording-exit-early")
 def recording_exit_early():
     """Skip to next episode (replaces right arrow key)"""
@@ -505,6 +557,40 @@ def delete_dataset(request: DatasetInfoRequest):
     return handle_delete_dataset(request)
 
 
+@app.post("/dataset-preview-info")
+def get_dataset_preview_info(request: DatasetInfoRequest):
+    """Return available local preview videos for a dataset."""
+    index = _dataset_video_index(request.dataset_repo_id)
+    if index is None:
+        return {
+            "success": False,
+            "message": f"No local preview videos found for {request.dataset_repo_id}",
+        }
+
+    all_counts = [len(files) for files in index.values() if files]
+    max_episodes = max(all_counts) if all_counts else 0
+    return {
+        "success": True,
+        "dataset_repo_id": request.dataset_repo_id,
+        "camera_names": list(index.keys()),
+        "available_episode_indices": list(range(max_episodes)),
+        "episodes_per_camera": {name: len(files) for name, files in index.items()},
+    }
+
+
+@app.get("/dataset-video")
+def get_dataset_video(dataset_repo_id: str, camera_name: str, episode_index: int):
+    """Serve a specific local dataset video for browser preview."""
+    index = _dataset_video_index(dataset_repo_id)
+    if index is None:
+        raise HTTPException(status_code=404, detail="Dataset videos not found")
+    if camera_name not in index:
+        raise HTTPException(status_code=404, detail="Camera video not found")
+    if episode_index < 0 or episode_index >= len(index[camera_name]):
+        raise HTTPException(status_code=404, detail="Episode video not found")
+    return FileResponse(index[camera_name][episode_index], media_type="video/mp4")
+
+
 # ============================================================================
 # VISUALIZER ENDPOINTS
 # ============================================================================
@@ -515,7 +601,7 @@ import os
 viz_process = None
 
 @app.post("/start-visualizer")
-def start_visualizer(request: DatasetInfoRequest):
+def start_visualizer(request: StartVisualizerRequest):
     """Start the lerobot_dataset_viz.py server for the requested dataset."""
     global viz_process
     
@@ -541,10 +627,11 @@ def start_visualizer(request: DatasetInfoRequest):
         venv_python,
         "-m", "lerobot.scripts.lerobot_dataset_viz",
         "--repo-id", request.dataset_repo_id,
-        "--episode-index", "0",
         "--mode", "distant",
         "--web-port", "9090"
     ]
+    if request.episode_index is not None:
+        cmd.extend(["--episode-index", str(request.episode_index)])
     
     # Run the background process
     # We do not wait for it to finish because it's a persistent server
@@ -561,7 +648,10 @@ def start_visualizer(request: DatasetInfoRequest):
     
     # Rerun web viewer at 9090 needs to be told to connect to the gRPC endpoint at 9876
     # Note: We must use %2B for the '+' sign so the browser doesn't decode it into a space
-    return {"success": True, "url": "http://localhost:9090/?url=rerun%2Bhttp://127.0.0.1:9876/proxy"}
+    return {
+        "success": True,
+        "url": "http://localhost:9090/?url=rerun%2Bhttp://127.0.0.1:9876/proxy&renderer=webgl",
+    }
 
 @app.post("/stop-visualizer")
 def stop_visualizer():
@@ -1212,30 +1302,31 @@ def get_available_cameras():
                 # and capability flags without opening via OpenCV first.
                 card_name = f"Camera {i}"
                 bus_info = ""
-                is_capture_capable = True  # assume capable if v4l2-ctl unavailable
+                is_capture_capable = False
                 try:
                     info = _sp.run(
                         ["v4l2-ctl", "--device", node, "--info"],
                         capture_output=True, text=True, timeout=2,
                     )
+                    
+                    device_caps_section = False
                     for line in info.stdout.splitlines():
                         if "Card type" in line or "card" in line.lower():
                             card_name = line.split(":", 1)[-1].strip()
                         elif "Bus info" in line or "bus_info" in line.lower():
                             bus_info = line.split(":", 1)[-1].strip()
-                    # Skip nodes that don't support video capture (metadata-only)
-                    is_capture_capable = "video capture" in info.stdout.lower()
+                        elif "Device Caps" in line:
+                            device_caps_section = True
+                        elif device_caps_section and "Video Capture" in line:
+                            is_capture_capable = True
                 except Exception:
                     pass
 
                 if not is_capture_capable:
                     continue
 
-                cap = cv2.VideoCapture(i, backend)
-                if not cap.isOpened():
-                    cap.release()
-                    continue
-
+                # Removed cv2.VideoCapture test to prevent indefinite hangs on bad V4L2 nodes.
+                # Since v4l2-ctl verified it is capture capable, we list it as available.
                 # Make name unique if another device already has this card name
                 display_name = card_name
                 existing_names = {c["name"] for c in cameras}
@@ -1251,7 +1342,7 @@ def get_available_cameras():
                         "available": True,
                     }
                 )
-                cap.release()
+
 
             return {"status": "success", "cameras": cameras}
 

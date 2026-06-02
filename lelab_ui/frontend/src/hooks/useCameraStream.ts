@@ -38,7 +38,12 @@ export function useCameraStream(deviceId: string, paused: boolean) {
 
     return () => {
       cancelled = true;
-      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+      }
     };
   }, [deviceId, paused]);
 

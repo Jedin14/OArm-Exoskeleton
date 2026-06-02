@@ -56,7 +56,7 @@ setup(
     maintainer_email='user@todo.todo',
     description='WebSocket远程控制器，接收外骨骼数据并转换为机器人关节命令',
     license='TODO: License declaration',
-    tests_require=['pytest'],
+    extras_require={'test': ['pytest']},
     entry_points={
         'console_scripts': [
             'websocket_teleoperator = qnbot_teleoperator.websocket_teleoperator:main',

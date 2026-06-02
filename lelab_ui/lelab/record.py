@@ -89,6 +89,10 @@ class DatasetInfoRequest(BaseModel):
     dataset_repo_id: str
 
 
+class SetEpisodeTaskRequest(BaseModel):
+    task: str
+
+
 def _extract_camera_names_from_features(features: list[str]) -> list[str]:
     """Extract logical camera names from LeRobot feature keys.
 
@@ -154,25 +158,101 @@ def _load_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
 
     info_path = ds_dir / "meta" / "info.json"
     tasks_path = ds_dir / "meta" / "tasks.jsonl"
+    tasks_parquet_path = ds_dir / "meta" / "tasks.parquet"
+    episodes_path = ds_dir / "meta" / "episodes.jsonl"
+    episodes_stats_path = ds_dir / "meta" / "episodes_stats.jsonl"
+
+    def _append_task(tasks: list[str], raw_task: Any) -> None:
+        t = str(raw_task or "").strip()
+        if t and t not in tasks:
+            tasks.append(t)
+
+    def _tasks_from_jsonl(path: Path) -> list[str]:
+        found: list[str] = []
+        if not path.is_file():
+            return found
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            # Common legacy/current keys observed across LeRobot metadata variants.
+            _append_task(found, obj.get("task"))
+            _append_task(found, obj.get("single_task"))
+            _append_task(found, obj.get("instruction"))
+            # Some variants store nested task metadata.
+            task_meta = obj.get("task_metadata")
+            if isinstance(task_meta, dict):
+                _append_task(found, task_meta.get("task"))
+                _append_task(found, task_meta.get("instruction"))
+        return found
+
+    def _tasks_from_parquet(path: Path) -> list[str]:
+        found: list[str] = []
+        if not path.is_file():
+            return found
+        # Prefer pandas when available (reads legacy/current parquet task tables).
+        try:
+            import pandas as pd
+
+            df = pd.read_parquet(path)
+            if "task" in df.columns:
+                for t in df["task"].tolist():
+                    _append_task(found, t)
+            if not found and getattr(df.index, "name", None) == "task":
+                for t in df.index.tolist():
+                    _append_task(found, t)
+            return found
+        except Exception:
+            pass
+        # Last-resort fallback when parquet readers are unavailable:
+        # pull plausible task strings from raw bytes for visibility.
+        try:
+            raw_bytes = path.read_bytes()
+            for m in re.findall(rb"[ -~]{16,}", raw_bytes):
+                text = m.decode("utf-8", errors="ignore").strip()
+                if "unknown task" in text.lower():
+                    continue
+                # Filter obvious schema/noise lines.
+                if text.lower() in {"pandas", "schema", "task", "task_index"}:
+                    continue
+                _append_task(found, text)
+        except Exception:
+            pass
+        return found
     try:
         raw = json.loads(info_path.read_text(encoding="utf-8"))
         feature_keys = list((raw.get("features") or {}).keys())
         single_task = "Unknown task"
-        if tasks_path.is_file():
-            for line in tasks_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                task_obj = json.loads(line)
-                single_task = task_obj.get("task", single_task)
-                if single_task:
-                    break
+        tasks: list[str] = []
+        # Primary source: tasks.jsonl (newer datasets)
+        for t in _tasks_from_jsonl(tasks_path):
+            _append_task(tasks, t)
+        # Common v3 source: tasks.parquet
+        for t in _tasks_from_parquet(tasks_parquet_path):
+            _append_task(tasks, t)
+        # Fallbacks: older dataset metadata layouts
+        for t in _tasks_from_jsonl(episodes_path):
+            _append_task(tasks, t)
+        for t in _tasks_from_jsonl(episodes_stats_path):
+            _append_task(tasks, t)
+
+        # Final fallback from info.json if present.
+        info_single_task = raw.get("single_task")
+        _append_task(tasks, info_single_task)
+
+        if tasks:
+            single_task = tasks[0]
 
         return {
             "success": True,
             "dataset_repo_id": repo_id,
             "num_episodes": int(raw.get("total_episodes", 0)),
             "single_task": single_task,
+            "tasks": tasks,
             "fps": raw.get("fps"),
             "features": feature_keys,
             "camera_names": _extract_camera_names_from_features(feature_keys),
@@ -182,6 +262,38 @@ def _load_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
     except Exception as e:
         logger.warning(f"Failed reading local dataset metadata for {repo_id}: {e}")
         return None
+
+
+def _extract_tasks_from_dataset_meta(meta: Any) -> list[str]:
+    """Best-effort extraction of task labels from LeRobotDataset.meta."""
+    tasks: list[str] = []
+    if meta is None:
+        return tasks
+    # Newer layouts often expose `meta.tasks` as a pandas object.
+    meta_tasks = getattr(meta, "tasks", None)
+    if meta_tasks is not None:
+        try:
+            # DataFrame with "task" column.
+            if hasattr(meta_tasks, "columns") and "task" in list(meta_tasks.columns):
+                for t in meta_tasks["task"].tolist():
+                    tt = str(t or "").strip()
+                    if tt and tt not in tasks:
+                        tasks.append(tt)
+            # Index may itself contain task labels.
+            if hasattr(meta_tasks, "index"):
+                for t in meta_tasks.index.tolist():
+                    tt = str(t or "").strip()
+                    if tt and tt not in tasks and tt.lower() != "unknown task":
+                        tasks.append(tt)
+        except Exception:
+            pass
+
+    single = getattr(meta, "single_task", None)
+    if isinstance(single, str):
+        s = single.strip()
+        if s and s not in tasks and s.lower() != "unknown task":
+            tasks.append(s)
+    return tasks
 
 
 def create_record_config(request: RecordingRequest) -> RecordConfig:
@@ -343,6 +455,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             "exit_early": False,  # Right arrow key -> "Skip to next episode" button
             "stop_recording": False,  # ESC key -> "Stop recording" button
             "rerecord_episode": False,  # Left arrow key -> "Re-record episode" button
+            "current_task": request.single_task,
         }
 
         record_config = create_record_config(request)
@@ -549,6 +662,7 @@ def handle_recording_status() -> dict[str, Any]:
         status["current_episode"] = current_episode
         status["total_episodes"] = recording_config.num_episodes
         status["saved_episodes"] = saved_episodes  # Track completed episodes
+        status["current_task"] = recording_events.get("current_task", recording_config.single_task) if recording_events else recording_config.single_task
 
         # Add session start time if available
         if recording_start_time:
@@ -587,19 +701,38 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
     # Prefer direct local metadata load to avoid accidental Hub 404s in
     # mixed local-only / private-repo setups.
     local_info = _load_local_dataset_info(request.dataset_repo_id)
-    if local_info is not None:
-        return local_info
 
     try:
         from lerobot.datasets import LeRobotDataset
 
         dataset = LeRobotDataset(request.dataset_repo_id)
         features = list(dataset.features.keys())
+        dataset_tasks = _extract_tasks_from_dataset_meta(getattr(dataset, "meta", None))
+        dataset_single_task = dataset_tasks[0] if dataset_tasks else "Unknown task"
+
+        if local_info is not None:
+            local_tasks = local_info.get("tasks") or []
+            local_single = str(local_info.get("single_task") or "").strip()
+            # If local parsing was weak (e.g. no jsonl but parquet exists),
+            # enrich from LeRobotDataset meta-derived tasks.
+            if not local_tasks or local_single.lower() == "unknown task":
+                merged_tasks: list[str] = []
+                for t in [*local_tasks, *dataset_tasks]:
+                    tt = str(t or "").strip()
+                    if tt and tt not in merged_tasks:
+                        merged_tasks.append(tt)
+                local_info["tasks"] = merged_tasks
+                local_info["single_task"] = (
+                    merged_tasks[0] if merged_tasks else dataset_single_task
+                )
+            return local_info
+
         return {
             "success": True,
             "dataset_repo_id": request.dataset_repo_id,
             "num_episodes": dataset.num_episodes,
-            "single_task": getattr(dataset.meta, "single_task", dataset.meta.tasks.index[0] if hasattr(dataset.meta, "tasks") and not dataset.meta.tasks.empty else "Unknown task"),
+            "single_task": dataset_single_task,
+            "tasks": dataset_tasks,
             "fps": dataset.fps,
             "features": features,
             "camera_names": _extract_camera_names_from_features(features),
@@ -607,6 +740,8 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
             "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
         }
     except Exception as e:
+        if local_info is not None:
+            return local_info
         logger.warning(f"Could not load local dataset {request.dataset_repo_id}: {e}")
         return {
             "success": False,
@@ -851,7 +986,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
                 teleop=teleop,
                 dataset=dataset,
                 control_time_s=cfg.dataset.episode_time_s,
-                single_task=cfg.dataset.single_task,
+                single_task=web_events.get("current_task", cfg.dataset.single_task),
                 display_data=cfg.display_data,
             )
 
@@ -935,8 +1070,11 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
             # Save episode immediately after recording phase (matches expected flow)
             logger.info(f"💾 Saving episode {current_episode}...")
             print(f"💾 STATUS CHANGE: Saving episode {current_episode}")
+            
             dataset.save_episode()
-            logger.info(f"✅ Episode {current_episode} saved successfully")
+            
+            episode_task = web_events.get("current_task", cfg.dataset.single_task)
+            logger.info(f"✅ Episode {current_episode} saved successfully with task: {episode_task}")
             print(f"✅ STATUS CHANGE: Episode {current_episode} saved successfully")
 
             # Increment episode counters after successful save

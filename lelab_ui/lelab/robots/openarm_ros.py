@@ -90,11 +90,20 @@ class OpenArmRosRobot(Robot):
             self._latest_obs[f"{name}.pos"] = 0.0
             self._latest_action[f"{name}.pos"] = 0.0
             
+        for i in range(14):
+            self._latest_obs[f"ee_pose_{i}.pos"] = 0.0
+        for i in range(2):
+            self._latest_obs[f"gripper_state_{i}.pos"] = 0.0
+            
         self._latest_buttons = []
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
         features = {f"{name}.pos": float for name in self.config.joint_names}
+        for i in range(14):
+            features[f"ee_pose_{i}.pos"] = float
+        for i in range(2):
+            features[f"gripper_state_{i}.pos"] = float
         # Add cameras
         for cam_key, cam in self.cameras.items():
             features[cam_key] = (cam.config.height, cam.config.width, 3)
@@ -115,7 +124,27 @@ class OpenArmRosRobot(Robot):
                 payload = json.loads(data.decode('utf-8'))
                 
                 # Update observation
-                for k, v in payload.get("observation", {}).items():
+                obs_payload = payload.get("observation", {})
+                
+                # 1. Parse joint_position array back into individual joints
+                if "joint_position" in obs_payload:
+                    jp = obs_payload["joint_position"]
+                    if len(jp) == len(self.config.joint_names):
+                        for i, name in enumerate(self.config.joint_names):
+                            self._latest_obs[f"{name}.pos"] = jp[i]
+                            
+                # 2. Parse ee_pose
+                if "ee_pose" in obs_payload:
+                    for i, val in enumerate(obs_payload["ee_pose"]):
+                        self._latest_obs[f"ee_pose_{i}.pos"] = float(val)
+                    
+                # 3. Parse gripper_state
+                if "gripper_state" in obs_payload:
+                    for i, val in enumerate(obs_payload["gripper_state"]):
+                        self._latest_obs[f"gripper_state_{i}.pos"] = float(val)
+                    
+                # Backward compatibility for any direct keys
+                for k, v in obs_payload.items():
                     if f"{k}.pos" in self._latest_obs:
                         self._latest_obs[f"{k}.pos"] = v
                         

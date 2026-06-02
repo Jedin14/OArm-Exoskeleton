@@ -41,6 +41,8 @@ const Landing = () => {
   const [showRecordingModal, setShowRecordingModal] = useState(false);
   const [datasetName, setDatasetName] = useState("");
   const [singleTask, setSingleTask] = useState("");
+  const [taskOptions, setTaskOptions] = useState<string[]>([]);
+  const taskOptionsRef = useRef<string[]>([]);
   const [numEpisodes, setNumEpisodes] = useState(5);
   const [episodeTimeS, setEpisodeTimeS] = useState(60);
   const [resetTimeS, setResetTimeS] = useState(15);
@@ -74,6 +76,16 @@ const Landing = () => {
           const data = await response.json();
           if (response.ok && data.success && Array.isArray(data.camera_names)) {
             setResumeCameraNames(data.camera_names);
+            const existingTasks = Array.isArray(data.tasks)
+              ? data.tasks.filter((t: unknown): t is string => typeof t === "string" && t.trim().length > 0)
+              : [];
+            setTaskOptions(existingTasks);
+            if (existingTasks.length > 0) {
+              setSingleTask(existingTasks[0]);
+            } else if (typeof data.single_task === "string" && data.single_task.trim().length > 0) {
+              setTaskOptions([data.single_task.trim()]);
+              setSingleTask(data.single_task.trim());
+            }
           } else {
             setResumeCameraNames([]);
           }
@@ -160,7 +172,32 @@ const Landing = () => {
 
   const handleCreateDataset = (name: string) => {
     setDatasetName(name);
+    const initialTask = singleTask.trim();
+    if (initialTask) {
+      setTaskOptions((prev) =>
+        prev.includes(initialTask) ? prev : [initialTask, ...prev]
+      );
+    }
     openRecordingModal();
+  };
+
+  const handleAddTaskOption = (task: string) => {
+    const normalized = task.trim();
+    if (!normalized) return;
+    setTaskOptions((prev) =>
+      prev.includes(normalized) ? prev : [...prev, normalized]
+    );
+    setSingleTask(normalized);
+  };
+
+  const handleDeleteTaskOption = (task: string) => {
+    setTaskOptions((prev) => {
+      const remaining = prev.filter((t) => t !== task);
+      if (singleTask === task) {
+        setSingleTask(remaining[0] ?? "");
+      }
+      return remaining;
+    });
   };
 
   const handleStartRecording = async () => {
@@ -202,7 +239,7 @@ const Landing = () => {
         description: `Releasing ${cameras.length} camera stream(s) for recording...`,
       });
       releaseStreamsRef.current();
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       console.log("✅ Camera streams released, proceeding with recording...");
       toast({
         title: "Camera Resources Ready",
@@ -241,6 +278,13 @@ const Landing = () => {
       follower_config: robot.follower_config,
       dataset_repo_id: datasetRepoId,
       single_task: singleTask,
+      task_options: Array.from(
+        new Set(
+          [...taskOptionsRef.current, singleTask.trim()].filter(
+            (t) => t.length > 0
+          )
+        )
+      ),
       num_episodes: numEpisodes,
       episode_time_s: episodeTimeS,
       reset_time_s: resetTimeS,
@@ -255,6 +299,10 @@ const Landing = () => {
     setShowRecordingModal(false);
     navigate("/recording", { state: { recordingConfig } });
   };
+
+  useEffect(() => {
+    taskOptionsRef.current = taskOptions;
+  }, [taskOptions]);
 
   return (
     <div
@@ -347,10 +395,13 @@ const Landing = () => {
         streamingEncoding={streamingEncoding}
         setStreamingEncoding={setStreamingEncoding}
         cameras={cameras}
-        setCameras={setCameras}
-        onStart={handleStartRecording}
-        releaseStreamsRef={releaseStreamsRef}
-        isResume={isResume}
+                setCameras={setCameras}
+                taskOptions={taskOptions}
+                onAddTaskOption={handleAddTaskOption}
+                onDeleteTaskOption={handleDeleteTaskOption}
+                onStart={handleStartRecording}
+                releaseStreamsRef={releaseStreamsRef}
+                isResume={isResume}
         previousCameraNames={resumeCameraNames}
       />
     </div>

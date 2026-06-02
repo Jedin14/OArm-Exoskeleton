@@ -364,12 +364,53 @@ source "/opt/ros/$ROS_DISTRO/setup.bash"
 source "$WS_DIR/install/setup.bash"
 set -u
 
+# ---------------------------------------------------------------------------
+# Fix: colcon's old setuptools path creates .egg-info but NOT .dist-info.
+# Python 3.10+ entry-point stubs use importlib.metadata which only reads
+# .dist-info.  Without this, every console_script immediately crashes with:
+#   PackageNotFoundError: No package metadata was found for qnbot-teleoperator
+# ---------------------------------------------------------------------------
+ensure_qnbot_dist_info() {
+    local site_packages="$WS_DIR/install/qnbot_teleoperator/lib/python3.10/site-packages"
+    local dist_info="$site_packages/qnbot_teleoperator-0.0.0.dist-info"
+    local egg_info="$site_packages/qnbot_teleoperator-0.0.0-py3.10.egg-info"
+
+    # Already present and valid?
+    if [[ -f "$dist_info/METADATA" ]]; then
+        return 0
+    fi
+
+    if [[ ! -d "$egg_info" ]]; then
+        err "Cannot find egg-info at $egg_info — workspace may not be built."
+        return 1
+    fi
+
+    log "Creating .dist-info so importlib.metadata can find qnbot-teleoperator ..."
+    mkdir -p "$dist_info"
+
+    cat > "$dist_info/METADATA" << 'METAEOF'
+Metadata-Version: 2.1
+Name: qnbot-teleoperator
+Version: 0.0.0
+Summary: WebSocket teleoperator for OpenArm exoskeleton
+METAEOF
+
+    echo "pip"      > "$dist_info/INSTALLER"
+    touch              "$dist_info/RECORD"
+    [[ -f "$egg_info/entry_points.txt" ]] && cp "$egg_info/entry_points.txt" "$dist_info/entry_points.txt"
+    [[ -f "$egg_info/top_level.txt"    ]] && cp "$egg_info/top_level.txt"    "$dist_info/top_level.txt"
+
+    log "dist-info created at $dist_info"
+}
+
 for pkg in qnbot_teleoperator openarm_bringup; do
     if ! ros2 pkg prefix "$pkg" &>/dev/null; then
         err "Package '$pkg' not found. Build the workspace first."
         exit 1
     fi
 done
+
+ensure_qnbot_dist_info
 
 if [[ "$USE_FAKE_HARDWARE" == "false" ]]; then
     ensure_openarm_hardware_plugin_registry
@@ -510,6 +551,9 @@ launch_step exo_retargeting \
     robot_type:=OpenArm
 
 # Step 3: OpenArm bimanual (ros2_control + RViz)
+# Use a longer delay so hardware has time to initialise before the bridge connects
+SAVED_DELAY="$STARTUP_DELAY"
+STARTUP_DELAY=$(( STARTUP_DELAY > 5 ? STARTUP_DELAY : 6 ))
 launch_step openarm_bringup \
     ros2 launch openarm_bringup openarm.bimanual.launch.py \
     arm_type:="$ARM_TYPE" \
@@ -518,6 +562,7 @@ launch_step openarm_bringup \
     use_fake_hardware:="$USE_FAKE_HARDWARE" \
     right_can_interface:="$RIGHT_CAN" \
     left_can_interface:="$LEFT_CAN"
+STARTUP_DELAY="$SAVED_DELAY"
 
 # Step 4: Bridge retargeted commands to controllers
 launch_step exoskeleton_bridge \
@@ -534,4 +579,7 @@ if [[ "$LAUNCH_LELAB" == "true" ]]; then
 fi
 log "Tail logs: tail -f $LOG_DIR/*.log"
 
-wait -n 2>/dev/null || wait
+# Wait for ALL child processes (not just the first to exit).
+# Using 'wait -n' would kill the whole pipeline the moment any single
+# component crashes; 'wait' keeps everything else running.
+wait

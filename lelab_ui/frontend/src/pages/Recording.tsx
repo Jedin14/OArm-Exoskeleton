@@ -2,6 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -47,6 +54,7 @@ interface RecordingConfig {
   follower_config: string;
   dataset_repo_id: string;
   single_task: string;
+  task_options?: string[];
   num_episodes: number;
   episode_time_s: number;
   reset_time_s: number;
@@ -77,6 +85,7 @@ interface BackendStatus {
     rerecord_episode: boolean;
   };
   joint_positions?: Record<string, number>;
+  current_task?: string;
 }
 
 const Recording = () => {
@@ -103,6 +112,56 @@ const Recording = () => {
   const warningFiredForPhaseRef = useRef<{ phase: Phase | null; episode: number | null; tick: number }>({ phase: null, episode: null, tick: 0 });
   // Guards against React StrictMode double-invocation of the start effect.
   const startInitiatedRef = useRef(false);
+
+  const [taskHistory, setTaskHistory] = useState<string[]>([]);
+  const [customTaskInput, setCustomTaskInput] = useState<string>("");
+  const [isUpdatingTask, setIsUpdatingTask] = useState(false);
+  const selectedTaskValue =
+    taskHistory.includes(customTaskInput) ? customTaskInput : undefined;
+
+  useEffect(() => {
+    if (recordingConfig && taskHistory.length === 0) {
+      const normalized = (recordingConfig.task_options ?? [])
+        .map((t) => (typeof t === "string" ? t.trim() : ""))
+        .filter((t) => t.length > 0);
+      const merged = normalized.length > 0
+        ? normalized
+        : [recordingConfig.single_task].filter((t) => !!t?.trim());
+      setTaskHistory(Array.from(new Set(merged)));
+      setCustomTaskInput(recordingConfig.single_task);
+    }
+  }, [recordingConfig, taskHistory.length]);
+
+  useEffect(() => {
+    if (taskHistory.length === 0) return;
+    if (!customTaskInput || !taskHistory.includes(customTaskInput)) {
+      setCustomTaskInput(taskHistory[0]);
+    }
+  }, [taskHistory, customTaskInput]);
+
+  const handleUpdateTask = async () => {
+    if (!customTaskInput.trim()) return;
+    setIsUpdatingTask(true);
+    try {
+      const response = await fetchWithHeaders(`${baseUrl}/set-episode-task`, {
+        method: "POST",
+        body: JSON.stringify({ task: customTaskInput.trim() }),
+      });
+      if (response.ok) {
+        toast({ title: "Task Updated", description: `Task set to: ${customTaskInput.trim()}` });
+        if (!taskHistory.includes(customTaskInput.trim())) {
+          setTaskHistory(prev => [...prev, customTaskInput.trim()]);
+        }
+      } else {
+        const data = await response.json();
+        toast({ title: "Error", description: data.message, variant: "destructive" });
+      }
+    } catch (err) {
+      toast({ title: "Connection Error", description: "Could not connect to backend", variant: "destructive" });
+    } finally {
+      setIsUpdatingTask(false);
+    }
+  };
 
   const toggleMute = useCallback(() => {
     setMutedState((prev) => {
@@ -557,6 +616,46 @@ const Recording = () => {
                 width: `${Math.min((phaseElapsedTime / phaseTimeLimit) * 100, 100)}%`,
               }}
             />
+          </div>
+
+          <div className="mb-8 p-4 bg-gray-800/50 rounded-xl border border-gray-700">
+            <div className="text-sm text-gray-400 mb-2 font-semibold">Current Episode Task</div>
+            <div className="flex flex-col gap-3">
+              {taskHistory.length > 0 && (
+                <Select value={selectedTaskValue} onValueChange={setCustomTaskInput}>
+                  <SelectTrigger className="bg-gray-900 border-gray-600 text-white">
+                    <SelectValue placeholder="Select existing task" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-gray-900 border-gray-700">
+                    {taskHistory.map((t, i) => (
+                      <SelectItem key={`${t}-${i}`} value={t} className="text-white hover:bg-gray-800">
+                        {t}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <input
+                type="text"
+                value={customTaskInput}
+                onChange={(e) => setCustomTaskInput(e.target.value)}
+                placeholder="Enter or edit task for this episode..."
+                className="flex h-10 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-white placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <Button 
+                onClick={handleUpdateTask} 
+                disabled={isUpdatingTask || customTaskInput.trim() === backendStatus?.current_task}
+                variant="secondary"
+                className="w-full bg-gray-700 hover:bg-gray-600 text-white border border-gray-600"
+              >
+                {customTaskInput.trim() === backendStatus?.current_task ? "Active Task" : "Assign to Episode"}
+              </Button>
+            </div>
+            {backendStatus?.current_task && customTaskInput.trim() !== backendStatus.current_task && (
+               <div className="mt-3 text-xs text-blue-400 bg-blue-900/20 p-2 rounded text-center break-words border border-blue-900/50">
+                 Currently recording as: <br/><strong>{backendStatus.current_task}</strong>
+               </div>
+            )}
           </div>
 
           <Button

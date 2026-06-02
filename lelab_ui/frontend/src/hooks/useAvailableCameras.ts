@@ -28,13 +28,39 @@ export function useAvailableCameras({
   const [cameras, setCameras] = useState<AvailableCamera[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
+  const browserOnlyFallback = useCallback(async (): Promise<AvailableCamera[]> => {
+    const browserDevices = (await navigator.mediaDevices.enumerateDevices())
+      .filter((d) => d.kind === "videoinput")
+      .map((d) => ({ deviceId: d.deviceId, label: d.label }));
+    const fallback = browserDevices.map((d, i) => ({
+      index: i,
+      name: d.label?.trim() || `Camera ${i}`,
+      deviceId: d.deviceId,
+      available: true,
+    }));
+    setCameras(fallback);
+    return fallback;
+  }, []);
+
   const refresh = useCallback(async (): Promise<AvailableCamera[]> => {
     setIsLoading(true);
     try {
-      // Need a permission grant before enumerateDevices() returns labels.
       try {
-        const probe = await navigator.mediaDevices.getUserMedia({ video: true });
-        probe.getTracks().forEach((t) => t.stop());
+        const streamPromise = navigator.mediaDevices.getUserMedia({ video: true });
+        try {
+          const probe = await Promise.race([
+            streamPromise,
+            new Promise<MediaStream>((_, reject) =>
+              setTimeout(() => reject(new Error("Timeout")), 2000)
+            ),
+          ]);
+          probe.getTracks().forEach((t) => t.stop());
+        } catch {
+          // Even if we timeout, ensure we stop the stream if it eventually resolves
+          streamPromise.then((stream) => {
+            stream.getTracks().forEach((t) => t.stop());
+          }).catch(() => {});
+        }
       } catch {
         // ignore — we'll still try to enumerate, just without labels
       }
@@ -43,10 +69,14 @@ export function useAvailableCameras({
         .filter((d) => d.kind === "videoinput")
         .map((d) => ({ deviceId: d.deviceId, label: d.label }));
 
-      const r = await fetchWithHeaders(`${baseUrl}/available-cameras`);
+      const r = await Promise.race([
+        fetchWithHeaders(`${baseUrl}/available-cameras`),
+        new Promise<Response>((_, reject) =>
+          setTimeout(() => reject(new Error("Timed out loading cameras")), 5000)
+        ),
+      ]);
       if (!r.ok) {
-        setCameras([]);
-        return [];
+        return await browserOnlyFallback();
       }
       const data = await r.json();
       const backendCams: {
@@ -90,12 +120,11 @@ export function useAvailableCameras({
       setCameras(merged);
       return merged;
     } catch {
-      setCameras([]);
-      return [];
+      return await browserOnlyFallback();
     } finally {
       setIsLoading(false);
     }
-  }, [baseUrl, fetchWithHeaders]);
+  }, [baseUrl, fetchWithHeaders, browserOnlyFallback]);
 
   useEffect(() => {
     if (!enabled) return;
