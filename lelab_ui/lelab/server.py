@@ -491,10 +491,18 @@ def recording_exit_early():
     return handle_exit_early()
 
 
+
 @app.post("/recording-rerecord-episode")
 def recording_rerecord_episode():
     """Re-record current episode (replaces left arrow key)"""
     return handle_rerecord_episode()
+
+@app.post("/recording-toggle-pause")
+def recording_toggle_pause():
+    """Toggle pause during recording phase"""
+    from lelab.record import handle_toggle_pause
+    return handle_toggle_pause()
+
 
 
 @app.post("/stop-and-home")

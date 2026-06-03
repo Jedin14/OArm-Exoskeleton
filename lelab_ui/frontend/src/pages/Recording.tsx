@@ -22,6 +22,7 @@ import {
   Square,
   SkipForward,
   Play,
+  Pause,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -79,10 +80,12 @@ interface BackendStatus {
   session_elapsed_seconds?: number;
   session_ended?: boolean;
   dataset_repo_id?: string;
+  is_paused?: boolean;
   available_controls: {
     stop_recording: boolean;
     exit_early: boolean;
     rerecord_episode: boolean;
+    toggle_pause?: boolean;
   };
   joint_positions?: Record<string, number>;
   current_task?: string;
@@ -358,6 +361,19 @@ const Recording = () => {
     }
   }, [backendStatus, optimisticPhase, baseUrl, fetchWithHeaders, toast]);
 
+  const handleTogglePause = useCallback(async () => {
+    if (!backendStatus?.available_controls.toggle_pause) return;
+    try {
+      const response = await fetchWithHeaders(`${baseUrl}/recording-toggle-pause`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) {
+        toast({ title: "Error", description: data.message, variant: "destructive" });
+      }
+    } catch (error) {
+      toast({ title: "Connection Error", description: "Could not connect to the backend server.", variant: "destructive" });
+    }
+  }, [backendStatus, baseUrl, fetchWithHeaders, toast]);
+
   const handleRerecordEpisode = useCallback(async () => {
     if (!backendStatus?.available_controls.rerecord_episode) return;
 
@@ -425,6 +441,7 @@ const Recording = () => {
   const handlersRef = useRef({
     handleExitEarly,
     handleRerecordEpisode,
+    handleTogglePause,
     requestStopRecording,
     showStopConfirm,
   });
@@ -453,6 +470,9 @@ const Recording = () => {
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         handlersRef.current.handleRerecordEpisode();
+      } else if (e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        handlersRef.current.handleTogglePause();
       } else if (e.key === "Escape") {
         if (handlersRef.current.showStopConfirm) return;
         handlersRef.current.requestStopRecording();
@@ -543,8 +563,8 @@ const Recording = () => {
           </Button>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          <div className="col-span-1 bg-gray-900 rounded-lg border border-gray-700 p-8 h-fit">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="col-span-1 lg:col-span-5 bg-gray-900 rounded-lg border border-gray-700 p-8 h-fit">
             <div className="flex justify-end items-center gap-4 mb-6 text-sm text-gray-400">
             <span aria-label={`Episode ${currentEpisode} of ${totalEpisodes}`}>
               Episode <span className="text-white font-semibold">{currentEpisode}</span> / {totalEpisodes}
@@ -589,7 +609,7 @@ const Recording = () => {
             </DropdownMenu>
           </div>
 
-          <div className="text-center mb-6">
+          <div className="text-center mb-6 flex justify-center gap-3">
             <div
               role="status"
               aria-live="polite"
@@ -598,6 +618,11 @@ const Recording = () => {
               <span className={`w-2 h-2 rounded-full ${phaseColor.dot} ${currentPhase !== "completed" ? "animate-pulse" : ""}`} />
               {getStatusText()}
             </div>
+            {backendStatus.is_paused && (
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold tracking-widest bg-yellow-500/20 text-yellow-500 border border-yellow-500/50 animate-pulse">
+                PAUSED
+              </div>
+            )}
           </div>
 
           <div className="text-center mb-4">
@@ -658,21 +683,35 @@ const Recording = () => {
             )}
           </div>
 
-          <Button
-            onClick={handleExitEarly}
-            disabled={
-              !backendStatus.available_controls.exit_early ||
-              optimisticPhase !== null ||
-              currentPhase === "completed"
-            }
-            className={`w-full text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
-          >
-            <PrimaryIcon className="w-5 h-5 mr-2" />
-            {primaryLabel}
-            {currentPhase !== "completed" && (
-              <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">SPACE / →</span>
-            )}
-          </Button>
+          <div className="flex flex-col gap-4">
+            <Button
+              onClick={handleTogglePause}
+              disabled={!backendStatus.available_controls.toggle_pause || currentPhase === "completed"}
+              className={`flex-1 text-white font-semibold py-6 text-lg disabled:opacity-50 ${backendStatus.is_paused ? 'bg-yellow-500 hover:bg-yellow-600 text-yellow-950' : 'bg-gray-700 hover:bg-gray-600'}`}
+            >
+              {backendStatus.is_paused ? (
+                <><Play className="w-5 h-5 mr-2" /> Resume <span className="ml-2 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">P</span></>
+              ) : (
+                <><Pause className="w-5 h-5 mr-2" /> Pause <span className="ml-2 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">P</span></>
+              )}
+            </Button>
+
+            <Button
+              onClick={handleExitEarly}
+              disabled={
+                !backendStatus.available_controls.exit_early ||
+                optimisticPhase !== null ||
+                currentPhase === "completed"
+              }
+              className={`flex-[2] text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}
+            >
+              <PrimaryIcon className="w-5 h-5 mr-2" />
+              {primaryLabel}
+              {currentPhase !== "completed" && (
+                <span className="ml-3 px-2 py-0.5 rounded text-xs font-mono bg-black/30 text-white/70">SPACE / →</span>
+              )}
+            </Button>
+          </div>
 
           {currentPhase === "completed" && (
             <p className="text-center text-sm text-gray-400 mt-6">
@@ -693,7 +732,7 @@ const Recording = () => {
           </div>
         </div>
 
-          <div className="lg:col-span-2 flex flex-col gap-8">
+          <div className="lg:col-span-7 flex flex-col gap-8">
             <RecordingCameraPreview cameras={Object.keys(recordingConfig.cameras || {})} />
             <div className="flex-1 min-h-[300px]">
               <JointGraph jointPositions={backendStatus.joint_positions} />

@@ -633,15 +633,18 @@ def handle_recording_status() -> dict[str, Any]:
             logger.info("📡 RECORDING STATUS REQUEST: Session has ended - frontend should stop polling")
             print("📡 STATUS CHANGE: Frontend is still polling after session end - should stop now")
 
+    is_paused = recording_events.get("pause_recording", False) if recording_events else False
     status = {
         "recording_active": recording_active,
         "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
         "session_ended": session_ended,  # New field to indicate session completion
+        "is_paused": is_paused,
         "available_controls": {
             "stop_recording": recording_active,  # ESC key replacement
             "exit_early": recording_active,  # Right arrow key replacement
             "rerecord_episode": recording_active
             and current_phase == "recording",  # Only during recording phase
+            "toggle_pause": recording_active and current_phase in ("recording", "resetting"),
         },
         "message": "Recording session failed with error - check logs"
         if current_phase == "error"
@@ -827,6 +830,283 @@ def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Failed to upload dataset: {str(e)}"}
 
 
+
+from lerobot.datasets import safe_stop_image_writer
+from lerobot.processor import RobotAction, RobotObservation, RobotProcessorPipeline
+from lerobot.robots import Robot
+from lerobot.teleoperators import Teleoperator
+from lerobot.teleoperators.keyboard import KeyboardTeleop
+from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.feature_utils import build_dataset_frame
+from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.visualization_utils import log_rerun_data
+
+@safe_stop_image_writer
+def custom_custom_record_loop(
+    robot: Robot,
+    events: dict,
+    fps: int,
+    teleop_action_processor: RobotProcessorPipeline,
+    robot_action_processor: RobotProcessorPipeline,
+    robot_observation_processor: RobotProcessorPipeline,
+    dataset = None,
+    teleop = None,
+    control_time_s: int | None = None,
+    single_task: str | None = None,
+    display_data: bool = False,
+    display_compressed_images: bool = False,
+):
+    import time
+    if dataset is not None and dataset.fps != fps:
+        raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
+
+    teleop_arm = teleop_keyboard = None
+    if isinstance(teleop, list):
+        teleop_keyboard = next((t for t in teleop if isinstance(t, KeyboardTeleop)), None)
+        teleop_arm = next((t for t in teleop if not isinstance(t, KeyboardTeleop)), None)
+
+    control_interval = 1 / fps
+    no_action_count = 0
+    timestamp = 0
+    start_episode_t = time.perf_counter()
+    
+    total_paused_time = 0.0
+    was_paused = False
+    pause_start_t = 0.0
+
+    while timestamp < control_time_s:
+        start_loop_t = time.perf_counter()
+
+        if events.get("exit_early"):
+            events["exit_early"] = False
+            break
+            
+        is_paused = events.get("pause_recording", False)
+        if is_paused and not was_paused:
+            was_paused = True
+            pause_start_t = time.perf_counter()
+        elif not is_paused and was_paused:
+            was_paused = False
+            total_paused_time += time.perf_counter() - pause_start_t
+
+        # Get robot observation
+        obs = robot.get_observation()
+        obs_processed = robot_observation_processor(obs)
+
+        if dataset is not None:
+            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+
+        # Get action from teleop
+        if isinstance(teleop, Teleoperator):
+            act = teleop.get_action()
+            if robot.name == "unitree_g1":
+                teleop.send_feedback(obs)
+
+            act_processed_teleop = teleop_action_processor((act, obs))
+            action_values = act_processed_teleop
+            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+
+        elif isinstance(teleop, list):
+            arm_action = teleop_arm.get_action()
+            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
+            keyboard_action = teleop_keyboard.get_action()
+            base_action = robot._from_keyboard_to_base_action(keyboard_action)
+            act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+            act_processed_teleop = teleop_action_processor((act, obs))
+            action_values = act_processed_teleop
+            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+        else:
+            no_action_count += 1
+            if no_action_count == 1 or no_action_count % 10 == 0:
+                logging.warning("No teleoperator provided, skipping action generation.")
+            continue
+
+        # Send action to robot
+        _sent_action = robot.send_action(robot_action_to_send)
+
+        # Write to dataset
+        if dataset is not None and not is_paused:
+            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+            frame = {**observation_frame, **action_frame, "task": single_task}
+            dataset.add_frame(frame)
+
+        if display_data:
+            log_rerun_data(
+                observation=obs_processed, action=action_values, compress_images=display_compressed_images
+            )
+
+        dt_s = time.perf_counter() - start_loop_t
+        sleep_time_s = control_interval - dt_s
+        if sleep_time_s < 0:
+            pass # ignore slow loop warnings to prevent spam
+        precise_sleep(max(sleep_time_s, 0.0))
+
+        current_pause_duration = (time.perf_counter() - pause_start_t) if is_paused else 0.0
+        timestamp = time.perf_counter() - start_episode_t - total_paused_time - current_pause_duration
+
+def handle_toggle_pause() -> dict:
+    """Toggle pause state of recording"""
+    global recording_events, current_phase
+    if not recording_active or recording_events is None:
+        return {"success": False, "message": "No recording session is active"}
+    if current_phase not in ("recording", "resetting"):
+        return {"success": False, "message": "Can only pause during recording or resetting phase"}
+    current_state = recording_events.get("pause_recording", False)
+    recording_events["pause_recording"] = not current_state
+    logger.info(f"Recording pause state toggled to: {not current_state}")
+    return {"success": True, "is_paused": not current_state}
+
+
+
+from lerobot.datasets import safe_stop_image_writer
+from lerobot.utils.feature_utils import build_dataset_frame
+from lerobot.datasets import LeRobotDataset
+from lerobot.processor import RobotProcessorPipeline
+from lerobot.robots import Robot
+from lerobot.teleoperators import Teleoperator
+from lerobot.teleoperators.keyboard import KeyboardTeleop
+from lerobot.utils.visualization_utils import log_rerun_data
+from lerobot.utils.robot_utils import precise_sleep
+import time
+import logging
+from lerobot.utils.constants import ACTION, OBS_STR
+
+def custom_record_loop(
+    robot: Robot,
+    events: dict,
+    fps: int,
+    teleop_action_processor: RobotProcessorPipeline[
+        tuple[RobotAction, RobotObservation], RobotAction
+    ],  # runs after teleop
+    robot_action_processor: RobotProcessorPipeline[
+        tuple[RobotAction, RobotObservation], RobotAction
+    ],  # runs before robot
+    robot_observation_processor: RobotProcessorPipeline[
+        RobotObservation, RobotObservation
+    ],  # runs after robot
+    dataset: LeRobotDataset | None = None,
+    teleop: Teleoperator | list[Teleoperator] | None = None,
+    control_time_s: int | None = None,
+    single_task: str | None = None,
+    display_data: bool = False,
+    display_compressed_images: bool = False,
+):
+    if dataset is not None and dataset.fps != fps:
+        raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
+
+    teleop_arm = teleop_keyboard = None
+    if isinstance(teleop, list):
+        teleop_keyboard = next((t for t in teleop if isinstance(t, KeyboardTeleop)), None)
+        teleop_arm = next(
+            (
+                t
+                for t in teleop
+                if isinstance(
+                    t,
+                    (
+                        so_leader.SO100Leader
+                        | so_leader.SO101Leader
+                        | koch_leader.KochLeader
+                        | omx_leader.OmxLeader
+                    ),
+                )
+            ),
+            None,
+        )
+
+        if not (teleop_arm and teleop_keyboard and len(teleop) == 2 and robot.name == "lekiwi_client"):
+            raise ValueError(
+                "For multi-teleop, the list must contain exactly one KeyboardTeleop and one arm teleoperator. Currently only supported for LeKiwi robot."
+            )
+
+    control_interval = 1 / fps
+
+    no_action_count = 0
+    timestamp = 0
+    start_episode_t = time.perf_counter()
+    while timestamp < control_time_s:
+        # Wait if recording is paused
+        while events.get("pause_recording", False) and not events.get("exit_early", False):
+            precise_sleep(0.1)
+            # Update start_episode_t so timestamp doesn't advance while paused
+            start_episode_t += 0.1
+            import lelab.record
+            if lelab.record.phase_start_time is not None:
+                lelab.record.phase_start_time += 0.1
+            
+        start_loop_t = time.perf_counter()
+
+        if events["exit_early"]:
+            events["exit_early"] = False
+            break
+
+        # Get robot observation
+        obs = robot.get_observation()
+
+        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
+        obs_processed = robot_observation_processor(obs)
+
+        if dataset is not None:
+            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+
+        # Get action from teleop
+        if isinstance(teleop, Teleoperator):
+            act = teleop.get_action()
+            if robot.name == "unitree_g1":
+                teleop.send_feedback(obs)
+
+            # Applies a pipeline to the raw teleop action, default is IdentityProcessor
+            act_processed_teleop = teleop_action_processor((act, obs))
+            action_values = act_processed_teleop
+            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+
+        elif isinstance(teleop, list):
+            arm_action = teleop_arm.get_action()
+            arm_action = {f"arm_{k}": v for k, v in arm_action.items()}
+            keyboard_action = teleop_keyboard.get_action()
+            base_action = robot._from_keyboard_to_base_action(keyboard_action)
+            act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
+            act_processed_teleop = teleop_action_processor((act, obs))
+            action_values = act_processed_teleop
+            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+        else:
+            no_action_count += 1
+            if no_action_count == 1 or no_action_count % 10 == 0:
+                logging.warning(
+                    "No teleoperator provided, skipping action generation. "
+                    "This is likely to happen when resetting the environment without a teleop device. "
+                    "The robot won't be at its rest position at the start of the next episode."
+                )
+            continue
+
+        # Send action to robot
+        # Action can eventually be clipped using `max_relative_target`,
+        # so action actually sent is saved in the dataset. action = postprocessor.process(action)
+        # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+        _sent_action = robot.send_action(robot_action_to_send)
+
+        # Write to dataset
+        if dataset is not None:
+            action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+            frame = {**observation_frame, **action_frame, "task": single_task}
+            dataset.add_frame(frame)
+
+        if display_data:
+            log_rerun_data(
+                observation=obs_processed, action=action_values, compress_images=display_compressed_images
+            )
+
+        dt_s = time.perf_counter() - start_loop_t
+
+        sleep_time_s: float = control_interval - dt_s
+        if sleep_time_s < 0:
+            logging.warning(
+                f"Record loop is running slower ({1 / dt_s:.1f} Hz) than the target FPS ({fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
+            )
+
+        precise_sleep(max(sleep_time_s, 0.0))
+
+        timestamp = time.perf_counter() - start_episode_t
 def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
@@ -840,7 +1120,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     from lerobot.datasets import LeRobotDataset
     from lerobot.processor import make_default_processors
     from lerobot.robots import make_robot_from_config
-    from lerobot.scripts.lerobot_record import record_loop
+    # Using custom_record_loop instead of imported record_loop
     from lerobot.teleoperators import make_teleoperator_from_config
     from lerobot.utils.feature_utils import hw_to_dataset_features
     from lerobot.utils.utils import log_say
@@ -976,7 +1256,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
             web_events["_exit_early_triggered"] = False
             logger.info(f"Recording phase - calling record_loop with events: {web_events}")
 
-            record_loop(
+            custom_record_loop(
                 robot=robot,
                 events=web_events,
                 fps=cfg.dataset.fps,
@@ -1033,7 +1313,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
                 web_events["exit_early"] = False
                 logger.info(f"Reset phase - calling record_loop with events: {web_events}")
 
-                record_loop(
+                custom_record_loop(
                     robot=robot,
                     events=web_events,
                     fps=cfg.dataset.fps,
@@ -1106,7 +1386,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
                 web_events["exit_early"] = False
                 logger.info(f"Reset phase - calling record_loop with events: {web_events}")
 
-                record_loop(
+                custom_record_loop(
                     robot=robot,
                     events=web_events,
                     fps=cfg.dataset.fps,
