@@ -111,10 +111,10 @@ class LeLabBridgeNode(Node):
     def obs_callback(self, msg: JointState):
         """Store position & velocity for every recognised openarm joint."""
         with self.lock:
-            for name, pos, vel in zip(msg.name, msg.position, msg.velocity):
+            for i, name in enumerate(msg.name):
                 if name in self._pos:
-                    self._pos[name] = float(pos)
-                    self._vel[name] = float(vel)
+                    self._pos[name] = float(msg.position[i]) if i < len(msg.position) else 0.0
+                    self._vel[name] = float(msg.velocity[i]) if i < len(msg.velocity) else 0.0
 
     def _extract_action(self, side: str, msg: JointState):
         with self.lock:

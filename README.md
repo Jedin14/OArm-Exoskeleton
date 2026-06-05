@@ -24,10 +24,13 @@ A unified launcher script `openarm_teleop.sh` is provided in the workspace root 
 ### Configure CAN Interfaces (Required for Real Hardware)
 If running on the real robot, ensure the USB-CAN adapters are connected and configure the CAN interfaces:
 ```bash
-sudo ip link set can0 type can bitrate 1000000
-sudo ip link set can1 type can bitrate 1000000
-sudo ip link set up can0
-sudo ip link set up can1
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 dbitrate 5000000 fd on
+sudo ip link set can0 up
+
+sudo ip link set can1 down
+sudo ip link set can1 type can bitrate 1000000 dbitrate 5000000 fd on
+sudo ip link set can1 up
 ```
 
 ### Waveshare USB-CAN-FD-B -> OpenArm Setup

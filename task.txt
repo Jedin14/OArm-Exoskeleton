@@ -1,4 +1,4 @@
-BeastVLA_v2
+BeastVLA_v2.1
 
 pick a packet from box 1 and place it in box 2
 recover failed pick and pick a packet from box 1 and place it in box 2
