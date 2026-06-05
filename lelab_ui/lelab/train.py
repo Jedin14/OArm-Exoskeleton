@@ -101,7 +101,31 @@ def build_training_command(
     PATH lookup picks up a different env (uv tool venv, miniforge3 base, etc.)
     that lacks lerobot.
     """
-    cmd: list[str] = [python_executable, "-m", "lerobot.scripts.lerobot_train"]
+    import json
+    import os
+    from pathlib import Path
+
+    script_module = "lerobot.scripts.lerobot_train"
+
+    # 🔧 v2.1 BACKWARDS COMPATIBILITY HACK: If training on a v2.1 dataset, 
+    # route the training job to the dedicated lerobot_v2_env
+    try:
+        lerobot_home = Path(os.environ.get("HF_LEROBOT_HOME", os.environ.get("LEROBOT_HOME", "~/.cache/huggingface/lerobot"))).expanduser()
+        ds_root = Path(request.dataset_root).expanduser() if request.dataset_root else lerobot_home / request.dataset_repo_id
+        info_path = ds_root / "meta" / "info.json"
+        
+        if info_path.exists():
+            with open(info_path) as f:
+                data = json.load(f)
+                if data.get("codebase_version") == "v2.1":
+                    v2_python = "/home/jed/openarm-vla/lerobot_v2_env/bin/python3.12"
+                    if os.path.exists(v2_python):
+                        python_executable = v2_python
+                        script_module = "lerobot.scripts.train"
+    except Exception:
+        pass
+
+    cmd: list[str] = [python_executable, "-m", script_module]
 
     # Dataset
     cmd.extend(["--dataset.repo_id", request.dataset_repo_id])

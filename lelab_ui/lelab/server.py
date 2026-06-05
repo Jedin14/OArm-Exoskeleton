@@ -111,7 +111,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _CHUNK_RE = re.compile(r"chunk-(\d+)")
-_FILE_RE = re.compile(r"file-(\d+)\.mp4$")
+_FILE_RE = re.compile(r"(?:file-|episode_)(\d+)\.mp4$")
 
 
 class StartTrainingBody(BaseModel):
@@ -153,8 +153,10 @@ def _dataset_video_index(repo_id: str) -> dict[str, list[Path]] | None:
         return None
 
     index: dict[str, list[Path]] = {}
+    
+    # Try v3.0 format: videos/{camera}/chunk-*/*.mp4
     for camera_dir in sorted(videos_root.iterdir()):
-        if not camera_dir.is_dir():
+        if not camera_dir.is_dir() or camera_dir.name.startswith("chunk-"):
             continue
         camera_name = camera_dir.name
         if camera_name.startswith("observation.images."):
@@ -162,6 +164,28 @@ def _dataset_video_index(repo_id: str) -> dict[str, list[Path]] | None:
         files = sorted(camera_dir.glob("chunk-*/*.mp4"), key=_video_sort_key)
         if files:
             index[camera_name] = files
+            
+    # Try v2.1 format: videos/chunk-*/{camera}/*.mp4
+    if not index:
+        for chunk_dir in sorted(videos_root.glob("chunk-*")):
+            if not chunk_dir.is_dir():
+                continue
+            for camera_dir in sorted(chunk_dir.iterdir()):
+                if not camera_dir.is_dir():
+                    continue
+                camera_name = camera_dir.name
+                if camera_name.startswith("observation.images."):
+                    camera_name = camera_name.removeprefix("observation.images.")
+                files = sorted(camera_dir.glob("*.mp4"), key=_video_sort_key)
+                if files:
+                    if camera_name not in index:
+                        index[camera_name] = []
+                    index[camera_name].extend(files)
+                    
+    # Ensure they are sorted across chunks if v2.1 was used
+    for cam in index:
+        index[cam] = sorted(index[cam], key=_video_sort_key)
+
     return index or None
 
 
@@ -577,9 +601,20 @@ def get_dataset_preview_info(request: DatasetInfoRequest):
 
     all_counts = [len(files) for files in index.values() if files]
     max_episodes = max(all_counts) if all_counts else 0
+    
+    codebase_version = "v3.0"
+    try:
+        from lelab.record import _load_local_dataset_info
+        info = _load_local_dataset_info(request.dataset_repo_id)
+        if info and "codebase_version" in info:
+            codebase_version = info["codebase_version"]
+    except Exception:
+        pass
+
     return {
         "success": True,
         "dataset_repo_id": request.dataset_repo_id,
+        "codebase_version": codebase_version,
         "camera_names": list(index.keys()),
         "available_episode_indices": list(range(max_episodes)),
         "episodes_per_camera": {name: len(files) for name, files in index.items()},

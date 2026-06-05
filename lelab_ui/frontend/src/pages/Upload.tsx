@@ -42,6 +42,7 @@ interface DatasetInfo {
   total_frames?: number;
   robot_type?: string;
   source?: DatasetSource;
+  codebase_version?: string;
 }
 
 interface UploadConfig {
@@ -427,6 +428,18 @@ const Upload = () => {
                   <div>
                     <span className="text-gray-400">Task:</span>
                     <p className="text-white">{datasetInfo.single_task}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-400">Format:</span>
+                    <p className="text-white">
+                      {datasetInfo.codebase_version ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-300 border border-gray-600">
+                          {datasetInfo.codebase_version}
+                        </span>
+                      ) : (
+                        "Unknown"
+                      )}
+                    </p>
                   </div>
                 </div>
                 <div className="space-y-3">

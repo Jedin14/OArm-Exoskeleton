@@ -1,8 +1,9 @@
-openarm_dataset
+BeastVLA_v2
 
 pick a packet from box 1 and place it in box 2
+recover failed pick and pick a packet from box 1 and place it in box 2
 
-main_camera 
+main_camera
 left_camera
 right_camera
 

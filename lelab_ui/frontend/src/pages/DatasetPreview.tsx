@@ -13,6 +13,7 @@ interface PreviewState {
 
 interface PreviewInfo {
   dataset_repo_id: string;
+  codebase_version?: string;
   camera_names: string[];
   available_episode_indices: number[];
   episodes_per_camera: Record<string, number>;
@@ -128,8 +129,13 @@ const DatasetPreview = () => {
             </Button>
             <div>
               <h1 className="text-2xl font-bold">Local Dataset Preview</h1>
-              <p className="text-sm text-gray-400 font-mono break-all">
+              <p className="text-sm text-gray-400 font-mono break-all flex items-center gap-2">
                 {info.dataset_repo_id}
+                {info.codebase_version && (
+                  <span className="bg-gray-800 border border-gray-600 px-2 py-0.5 rounded text-xs font-semibold text-gray-300">
+                    {info.codebase_version}
+                  </span>
+                )}
               </p>
             </div>
           </div>

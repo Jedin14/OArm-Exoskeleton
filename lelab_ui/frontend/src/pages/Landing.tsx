@@ -47,6 +47,7 @@ const Landing = () => {
   const [episodeTimeS, setEpisodeTimeS] = useState(60);
   const [resetTimeS, setResetTimeS] = useState(15);
   const [streamingEncoding, setStreamingEncoding] = useState(true);
+  const [datasetVersion, setDatasetVersion] = useState("v3.0");
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
 
   const releaseStreamsRef = useRef<(() => void) | null>(null);
@@ -293,9 +294,14 @@ const Landing = () => {
       push_to_hub: false,
       resume: isResume,
       streaming_encoding: streamingEncoding,
+      dataset_version: datasetVersion,
       cameras: cameraDict,
     };
 
+    if (releaseStreamsRef.current) {
+      console.log("🧹 Start recording: Releasing camera streams");
+      releaseStreamsRef.current();
+    }
     setShowRecordingModal(false);
     navigate("/recording", { state: { recordingConfig } });
   };
@@ -394,6 +400,8 @@ const Landing = () => {
         setResetTimeS={setResetTimeS}
         streamingEncoding={streamingEncoding}
         setStreamingEncoding={setStreamingEncoding}
+        datasetVersion={datasetVersion}
+        setDatasetVersion={setDatasetVersion}
         cameras={cameras}
                 setCameras={setCameras}
                 taskOptions={taskOptions}

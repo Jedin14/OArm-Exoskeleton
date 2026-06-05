@@ -41,6 +41,7 @@ const DatasetCombobox: React.FC<Props> = ({ datasets, loading, value, onChange }
     >
       <Check className={cn("mr-2 h-4 w-4", value === d.repo_id ? "opacity-100" : "opacity-0")} />
       <span className="flex-1 truncate">{d.repo_id}</span>
+      {d.codebase_version && <span className="text-xs text-blue-400 mr-2 border border-blue-400/30 bg-blue-400/10 px-1 rounded">{d.codebase_version}</span>}
       {d.source === "both" && <span className="text-xs text-gray-400 mr-2">on Hub</span>}
       {d.private && <span className="text-xs text-amber-400">private</span>}
     </CommandItem>

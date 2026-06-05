@@ -77,6 +77,7 @@ class RecordingRequest(BaseModel):
     streaming_encoding: bool = True
     cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
+    dataset_version: str = "v3.0"  # Target version to save dataset in (v2.1 or v3.0)
 
 
 class UploadRequest(BaseModel):
@@ -258,6 +259,7 @@ def _load_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
             "camera_names": _extract_camera_names_from_features(feature_keys),
             "total_frames": int(raw.get("total_frames", 0)),
             "robot_type": raw.get("robot_type", "Unknown robot"),
+            "codebase_version": raw.get("codebase_version", "v2.1"),
         }
     except Exception as e:
         logger.warning(f"Failed reading local dataset metadata for {repo_id}: {e}")
@@ -514,8 +516,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     )
                     time.sleep(3.0)
 
-                dataset = record_with_web_events(record_config, recording_events)
+                dataset = record_with_web_events(record_config, recording_events, request.dataset_version)
                 logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
+                if hasattr(dataset, "finalize"):
+                    logger.info("Finalizing dataset buffers...")
+                    dataset.finalize()
                 features = list(dataset.features.keys())
                 last_recording_info = {
                     "success": True,
@@ -527,6 +532,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     "camera_names": _extract_camera_names_from_features(features),
                     "total_frames": dataset.num_frames,
                     "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
+                    "codebase_version": request.dataset_version,
                 }
             except Exception as e:
                 import traceback
@@ -741,6 +747,7 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
             "camera_names": _extract_camera_names_from_features(features),
             "total_frames": dataset.num_frames,
             "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
+            "codebase_version": getattr(dataset.meta, "codebase_version", "v3.0"),
         }
     except Exception as e:
         if local_info is not None:
@@ -1107,7 +1114,7 @@ def custom_record_loop(
         precise_sleep(max(sleep_time_s, 0.0))
 
         timestamp = time.perf_counter() - start_episode_t
-def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDataset:
+def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version: str = "v3.0") -> LeRobotDataset:
     """
     Implement recording with phase tracking - exactly mirrors original record() function behavior
     """
@@ -1155,37 +1162,70 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
             logger.info(f"🔧 RESUME: Set explicit local root directory path: {cfg.dataset.root}")
 
         num_cameras = len(robot.cameras) if hasattr(robot, "cameras") else 0
-        dataset = LeRobotDataset.resume(
-            cfg.dataset.repo_id,
-            root=cfg.dataset.root,
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-            vcodec=cfg.dataset.vcodec,
-            streaming_encoding=cfg.dataset.streaming_encoding,
-            encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
-            encoder_threads=cfg.dataset.encoder_threads,
-            image_writer_processes=cfg.dataset.num_image_writer_processes if num_cameras > 0 else 0,
-            image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras
-            if num_cameras > 0
-            else 0,
-        )
+        
+        # When resuming, determine version from dataset metadata rather than user selection
+        actual_version = dataset_version
+        try:
+            info = _load_local_dataset_info(cfg.dataset.repo_id)
+            if info and "codebase_version" in info:
+                actual_version = info["codebase_version"]
+                logger.info(f"🔧 RESUME: Detected dataset codebase_version '{actual_version}'")
+        except Exception as e:
+            logger.warning(f"🔧 RESUME: Failed to parse existing dataset version: {e}")
+            
+        if actual_version == "v2.1":
+            from .utils.v2_dataset import LeRobotDatasetV2
+            dataset = LeRobotDatasetV2.resume(
+                cfg.dataset.repo_id,
+                fps=cfg.dataset.fps,
+                features=dataset_features,
+                root=cfg.dataset.root,
+                robot_type=robot.name,
+                use_videos=cfg.dataset.video,
+            )
+        else:
+            dataset = LeRobotDataset.resume(
+                cfg.dataset.repo_id,
+                root=cfg.dataset.root,
+                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                vcodec=cfg.dataset.vcodec,
+                streaming_encoding=cfg.dataset.streaming_encoding,
+                encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                encoder_threads=cfg.dataset.encoder_threads,
+                image_writer_processes=cfg.dataset.num_image_writer_processes if num_cameras > 0 else 0,
+                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras
+                if num_cameras > 0
+                else 0,
+            )
         sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
     else:
         sanity_check_dataset_name(cfg.dataset.repo_id, None)
-        dataset = LeRobotDataset.create(
-            cfg.dataset.repo_id,
-            cfg.dataset.fps,
-            root=cfg.dataset.root,
-            robot_type=robot.name,
-            features=dataset_features,
-            use_videos=cfg.dataset.video,
-            image_writer_processes=cfg.dataset.num_image_writer_processes,
-            image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
-            batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-            vcodec=cfg.dataset.vcodec,
-            streaming_encoding=cfg.dataset.streaming_encoding,
-            encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
-            encoder_threads=cfg.dataset.encoder_threads,
-        )
+        if dataset_version == "v2.1":
+            from .utils.v2_dataset import LeRobotDatasetV2
+            dataset = LeRobotDatasetV2.create(
+                cfg.dataset.repo_id,
+                cfg.dataset.fps,
+                features=dataset_features,
+                root=cfg.dataset.root,
+                robot_type=robot.name,
+                use_videos=cfg.dataset.video,
+            )
+        else:
+            dataset = LeRobotDataset.create(
+                cfg.dataset.repo_id,
+                cfg.dataset.fps,
+                root=cfg.dataset.root,
+                robot_type=robot.name,
+                features=dataset_features,
+                use_videos=cfg.dataset.video,
+                image_writer_processes=cfg.dataset.num_image_writer_processes,
+                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                vcodec=cfg.dataset.vcodec,
+                streaming_encoding=cfg.dataset.streaming_encoding,
+                encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                encoder_threads=cfg.dataset.encoder_threads,
+            )
 
     # 🔧 ROBOT CONNECTION: Connect with enhanced error handling for camera conflicts
     try:
@@ -1200,6 +1240,10 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
             logger.error(
                 "💡 ROBOT CONNECTION: Make sure frontend camera streams are released before recording"
             )
+        try:
+            robot.disconnect()
+        except Exception:
+            pass
         raise
 
     if teleop is not None:
@@ -1209,6 +1253,11 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
             logger.info("✅ TELEOP CONNECTION: Teleoperator connected successfully")
         except Exception as e:
             logger.error(f"❌ TELEOP CONNECTION: Failed to connect teleoperator: {e}")
+            try:
+                robot.disconnect()
+                teleop.disconnect()
+            except Exception:
+                pass
             raise
 
     # Ensure calibration is properly loaded and applied to the devices

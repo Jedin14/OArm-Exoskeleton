@@ -45,6 +45,19 @@ def _dir_mtime_iso(path: Path) -> str | None:
         return None
 
 
+def _get_codebase_version(path: Path) -> str | None:
+    try:
+        info_path = path / "meta" / "info.json"
+        if info_path.is_file():
+            import json
+            with open(info_path, "r") as f:
+                info = json.load(f)
+            return info.get("codebase_version")
+    except Exception:
+        pass
+    return None
+
+
 def list_local_datasets() -> list[dict[str, Any]]:
     """Scan the LeRobot cache for local datasets (dirs containing meta/info.json).
 
@@ -76,6 +89,7 @@ def list_local_datasets() -> list[dict[str, Any]]:
                     "repo_id": top.name,
                     "last_modified": _dir_mtime_iso(top),
                     "private": False,
+                    "codebase_version": _get_codebase_version(top)
                 }
             )
             continue
@@ -97,11 +111,11 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "repo_id": f"{top.name}/{sub.name}",
                         "last_modified": _dir_mtime_iso(sub),
                         "private": False,
+                        "codebase_version": _get_codebase_version(sub)
                     }
                 )
 
-    out.sort(key=lambda d: d["last_modified"] or "", reverse=True)
-    return out
+    return sorted(out, key=lambda x: x["last_modified"] or "", reverse=True)
 
 
 def list_user_datasets() -> list[dict[str, Any]]:
@@ -154,6 +168,9 @@ def list_all_datasets() -> list[dict[str, Any]]:
             a = existing.get("last_modified") or ""
             b = item.get("last_modified") or ""
             existing["last_modified"] = max(a, b) or None
+            # Keep local codebase_version
+            if "codebase_version" in item and item["codebase_version"]:
+                existing["codebase_version"] = item["codebase_version"]
         else:
             merged[rid] = {**item, "source": "local"}
 

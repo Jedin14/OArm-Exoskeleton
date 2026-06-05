@@ -47,6 +47,8 @@ interface RecordingModalProps {
   setResetTimeS: (value: number) => void;
   streamingEncoding: boolean;
   setStreamingEncoding: (value: boolean) => void;
+  datasetVersion: string;
+  setDatasetVersion: (value: string) => void;
   cameras: CameraConfig[];
   setCameras: (cameras: CameraConfig[]) => void;
   onStart: () => void;
@@ -74,6 +76,8 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   setResetTimeS,
   streamingEncoding,
   setStreamingEncoding,
+  datasetVersion,
+  setDatasetVersion,
   cameras,
   setCameras,
   onStart,
@@ -316,6 +320,24 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                       className="bg-gray-800 border-gray-700 text-white"
                     />
                   </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium text-gray-300">
+                    Dataset Format
+                  </Label>
+                  <Select value={datasetVersion} onValueChange={setDatasetVersion}>
+                    <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-full">
+                      <SelectValue placeholder="Select format" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-gray-800 border-gray-700">
+                      <SelectItem value="v3.0" className="text-white hover:bg-gray-700">
+                        v3.0 (New, chunked files)
+                      </SelectItem>
+                      <SelectItem value="v2.1" className="text-white hover:bg-gray-700">
+                        v2.1 (Legacy, one file per episode)
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             </div>
