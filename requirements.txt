@@ -1,0 +1,33 @@
+# OpenArm Teleop Python dependencies
+#
+# This file installs the Python packages used by the workspace utilities and
+# the leLab UI. It does not replace ROS 2, CAN drivers, or other system-level
+# prerequisites that must still be installed separately for a full robot setup.
+# Use Python 3.12+ for the full workspace.
+
+# Core runtime dependencies
+numpy>=1.26
+websockets>=15.0.1
+uvicorn>=0.24.0
+fastapi[standard]>=0.115.12
+psutil>=5.9.0
+pyyaml>=6.0
+pyusb>=1.2.1
+cryptography>=42.0.0
+pyserial>=3.5
+python-can>=4.4.0
+imageio>=2.34.0
+pandas>=2.2.0
+pyarrow>=16.0.0
+torchvision>=0.18.0
+huggingface_hub>=0.23.0
+
+# LeRobot integration used by lelab_ui
+lerobot[core_scripts,feetech,training] @ git+https://github.com/huggingface/lerobot.git@82dffde7fad11cba91f7916b050fbe7d7eea35ab ; python_version >= "3.12"
+
+# Developer and test helpers
+pytest>=7.0
+pytest-asyncio>=0.23
+httpx>=0.27
+ruff>=0.6
+pre-commit>=3.0

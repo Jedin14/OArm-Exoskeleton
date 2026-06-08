@@ -17,6 +17,20 @@ This package provides a complete, low-latency teleoperation stack for controllin
 
 ---
 
+## Installation
+
+After cloning the repository, install the Python dependencies from the top-level requirements file:
+
+```bash
+pip install -r requirements.txt
+```
+
+Use Python 3.12+ for the full workspace, especially the leLab UI.
+
+This file covers the Python packages used by the workspace utilities and the leLab UI. It does not install ROS 2, CAN drivers, or other system-level dependencies, so those still need to be set up separately for real hardware use.
+
+The launcher script also performs startup checks for common runtime issues such as missing CAN interfaces or missing ROS workspace packages.
+
 ## 🚀 Quick Start (Run Code)
 
 A unified launcher script `openarm_teleop.sh` is provided in the workspace root to handle all workspace sourcing, background launching of the WebSocket server, retargeting, openarm bringing-up, and exoskeleton bridge.
