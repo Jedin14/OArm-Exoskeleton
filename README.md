@@ -109,3 +109,7 @@ You can adjust the following parameters inside the `teleop_sim_full.launch.py` o
 - `smooth_alpha` (default: 0.15): EMA filter coefficient (lower = smoother but slightly more latent).
 - `gripper_scaling_factor` (default: 0.05): Calibration multiplier for the physical gripper.
 # OpenArm-Exoskeleton
+
+
+left_camera:  /dev/v4l/by-path/pci-0000:80:14.0-usb-0:9.1:1.0-video-index0
+right_camera: /dev/v4l/by-path/pci-0000:80:14.0-usb-0:2.1.1:1.0-video-index0

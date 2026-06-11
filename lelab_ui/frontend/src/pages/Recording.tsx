@@ -449,6 +449,7 @@ const Recording = () => {
     handlersRef.current = {
       handleExitEarly,
       handleRerecordEpisode,
+      handleTogglePause,
       requestStopRecording,
       showStopConfirm,
     };
@@ -467,7 +468,7 @@ const Recording = () => {
       if (e.key === " " || e.code === "Space" || e.key === "ArrowRight") {
         e.preventDefault();
         handlersRef.current.handleExitEarly();
-      } else if (e.key === "ArrowLeft") {
+      } else if (e.key === "ArrowLeft" || e.key.toLowerCase() === "r") {
         e.preventDefault();
         handlersRef.current.handleRerecordEpisode();
       } else if (e.key.toLowerCase() === "p") {
