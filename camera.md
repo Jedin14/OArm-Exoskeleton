@@ -22,13 +22,13 @@ The Xitech stereo cameras report identical serial numbers, making serial-number-
 Make the script executable:
 
 ```bash
-chmod +x ~/camera_setup/setup_cameras.sh
+chmod +x setup_cameras.sh
 ```
 
 Run:
 
 ```bash
-~/camera_setup/setup_cameras.sh
+setup_cameras.sh
 ```
 
 ---
