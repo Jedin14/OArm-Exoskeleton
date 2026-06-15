@@ -37,5 +37,6 @@ py.extension_module(
     'openarm_can',
     'src/openarm_can.cpp',
     install: true,
+    include_directories: '../include',
     dependencies: [openarm_cpp_dep, nanobind_dep],
 )

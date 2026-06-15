@@ -1,0 +1,10 @@
+source install/setup.bash
+
+# Both arms (default)
+PYTHONPATH=/home/jed/openarm-vla/lerobot/src /home/jed/openarm-vla/lerobot_v2_env/bin/python3.12 deploy_act_policy.py
+
+# Right arm only
+PYTHONPATH=/home/jed/openarm-vla/lerobot/src /home/jed/openarm-vla/lerobot_v2_env/bin/python3.12 deploy_act_policy.py --right
+
+# Custom model path
+python3.12 deploy_act_policy.py --model /path/to/model
