@@ -110,6 +110,7 @@ You can adjust the following parameters inside the `teleop_sim_full.launch.py` o
 - `gripper_scaling_factor` (default: 0.05): Calibration multiplier for the physical gripper.
 # OpenArm-Exoskeleton
 
-
-left_camera:  /dev/v4l/by-path/pci-0000:80:14.0-usb-0:9.1:1.0-video-index0
-right_camera: /dev/v4l/by-path/pci-0000:80:14.0-usb-0:2.1.1:1.0-video-index0
+[0:8] = left joint positions (radians)
+[8:16] = right joint positions (radians)
+[16:30] = ee_pose: [left_x, y, z, qx, qy, qz, qw, right_x, y, z, qx, qy, qz, qw]
+[30:32] = gripper_state: [left_finger, right_finger]

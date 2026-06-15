@@ -21,7 +21,8 @@ import openarm_can as oa
 MODEL_PATH = "/home/jed/openarm_models/act_packet200/checkpoints/100000/pretrained_model"
 RIGHT_CAN  = "can0"
 LEFT_CAN   = "can1"
-CONTROL_HZ = 10
+INFERENCE_HZ = 30    # Dataset was recorded at 30 fps; model assumes 30Hz temporal ensembling
+CONTROL_HZ   = 100   # High-frequency motor control loop for smooth interpolation
 
 # Motor types per arm (J1-J7)
 MOTOR_TYPES = [
@@ -80,19 +81,92 @@ def read_arm_state(arm):
 
 def send_arm_action(arm, action8):
     """Send 8-element radian action to arm + gripper via MIT control."""
-    cmds = [oa.MITParam(KP[i], KD[i], action8[i], 0.0, 0.0) for i in range(7)]
+    cmds = [oa.MITParam(KP[i], KD[i], float(action8[i]), 0.0, 0.0) for i in range(7)]
     arm.get_arm().mit_control_all(cmds)
-    arm.get_gripper().mit_control_all([oa.MITParam(KP[7], KD[7], action8[7], 0.0, 0.0)])
+    arm.get_gripper().mit_control_all([oa.MITParam(KP[7], KD[7], float(action8[7]), 0.0, 0.0)])
     arm.recv_all()
 
 def img_to_tensor(frame):
-    t = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
+    # cv2 reads frames in BGR, but LeRobot models are trained on RGB.
+    # We MUST convert the color space, otherwise the ResNet encoder sees 
+    # corrupted colors and outputs chaotic actions.
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    t = torch.from_numpy(frame_rgb).permute(2, 0, 1).float() / 255.0
     if torch.cuda.is_available():
         t = t.cuda()
     return t.unsqueeze(0)
 
+
+# ── Thread Shared State ───────────────────────────────────────────────────────
+shared_lock = threading.Lock()
+shared_right_state = None
+shared_left_state = None
+shared_target_action = None  # length 16: [left 0:8, right 8:16]
+inference_running = True
+
+def inference_worker(policy, cam_main, cam_right, cam_left, is_bimanual, stats):
+    """Background thread running policy inference at ~10Hz."""
+    global shared_right_state, shared_left_state, shared_target_action, inference_running
+    import openarm_fk
+    
+    img_mean = stats["observation.images.main_camera.mean"].cuda()
+    img_std  = stats["observation.images.main_camera.std"].cuda()
+    state_mean = stats["observation.state.mean"].cuda()
+    state_std  = stats["observation.state.std"].cuda()
+    act_mean = stats["action.mean"].cpu().numpy()
+    act_std  = stats["action.std"].cpu().numpy()
+
+    while inference_running:
+        t0 = time.time()
+        
+        f_main = cam_main.read()
+        f_right = cam_right.read()
+        f_left = cam_left.read()
+        
+        if f_main is None or f_right is None or f_left is None:
+            time.sleep(0.01)
+            continue
+            
+        with shared_lock:
+            right_st = shared_right_state
+            left_st = shared_left_state
+            
+        if right_st is None or (is_bimanual and left_st is None):
+            time.sleep(0.01)
+            continue
+            
+        # Build state
+        state = openarm_fk.build_state(left_st, right_st)
+        
+        state_t = torch.tensor(state, dtype=torch.float32)
+        if torch.cuda.is_available():
+            state_t = state_t.cuda()
+
+        obs = {
+            "observation.images.main_camera":  (img_to_tensor(f_main) - img_mean) / img_std,
+            "observation.images.right_camera": (img_to_tensor(f_right) - img_mean) / img_std,
+            "observation.images.left_camera":  (img_to_tensor(f_left) - img_mean) / img_std,
+            "observation.state": ((state_t - state_mean) / state_std).unsqueeze(0),
+        }
+
+        with torch.inference_mode():
+            action = policy.select_action(obs).squeeze(0).cpu().numpy()
+            action = (action * act_std) + act_mean
+            
+        with shared_lock:
+            shared_target_action = action.copy()
+            
+        # Rate control for inference
+        elapsed = time.time() - t0
+        sleep_t = (1.0 / INFERENCE_HZ) - elapsed
+        if sleep_t > 0:
+            time.sleep(sleep_t)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
+    global shared_right_state, shared_left_state, shared_target_action, inference_running
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--right", action="store_true",
                         help="Run right arm only (left arm stays passive)")
@@ -103,102 +177,112 @@ def main():
     mode = "RIGHT ONLY" if args.right else "BIMANUAL"
     print(f"\n=== ACT Deploy [{mode}] ===")
 
-    # Load policy
+    # Load policy and stats
     print(f"Loading model from {args.model}...")
     policy = ACTPolicy.from_pretrained(args.model)
     policy.eval()
     if torch.cuda.is_available():
         policy.cuda()
 
+    import safetensors.torch
+    stats_path = f"{args.model}/policy_preprocessor_step_3_normalizer_processor.safetensors"
+    stats = safetensors.torch.load_file(stats_path)
+    print("Loaded normalization stats from safetensors.")
+
     # Init hardware
     print("Initializing right arm (can0)...")
     right_arm = init_arm(RIGHT_CAN)
 
     left_arm = None
-    if not args.right:
+    is_bimanual = not args.right
+    if is_bimanual:
         print("Initializing left arm (can1)...")
         left_arm = init_arm(LEFT_CAN)
 
-    # Init cameras
-    print("Starting cameras (main=10, right=4, left=12)...")
-    cam_main  = Camera(10)
-    cam_right = Camera(4)
-    cam_left  = Camera(12)
+    print("Starting cameras (main, right, left)...")
+    cam_main  = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:4.1:1.3-video-index0")
+    cam_right = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.1.1:1.0-video-index0")
+    cam_left  = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:9.1:1.0-video-index0")
     time.sleep(1.0)  # warmup
 
-    print("Starting control loop... (Ctrl+C to stop)\n")
+    print("Starting Inference Thread...")
+    inf_thread = threading.Thread(target=inference_worker, 
+                                  args=(policy, cam_main, cam_right, cam_left, is_bimanual, stats), 
+                                  daemon=True)
+    inf_thread.start()
+
+    print(f"Starting High-Frequency Control Loop ({CONTROL_HZ} Hz)... (Ctrl+C to stop)\n")
+    
+    current_action_right = None
+    current_action_left = None
     step = 0
+    dt = 1.0 / CONTROL_HZ
+    
+    # Exponential smoothing alpha for 100Hz interpolation towards 30Hz targets
+    # alpha=0.08 closes ~22% of the gap over 33ms (3 steps). This creates a highly 
+    # filtered, buttery smooth trajectory that gracefully absorbs inference jitter
+    # without stalling the motors (which causes jerkiness).
+    alpha = 0.08
+
     try:
         while True:
             t0 = time.time()
 
-            # ── 1. Read cameras ──────────────────────────────────────────────
-            f_main  = cam_main.read()
-            f_right = cam_right.read()
-            f_left  = cam_left.read()
-            if f_main is None or f_right is None or f_left is None:
-                continue
-
-            # ── 2. Read arm states ───────────────────────────────────────────
+            # 1. Read hardware state
             right_arm.refresh_all()
             right_arm.recv_all()
-            right_state = read_arm_state(right_arm)  # 8 values, radians
-
-            left_state = [0.0] * 8
-            if left_arm is not None:
+            right_st = read_arm_state(right_arm)
+            
+            left_st = [-0.0091, -0.0444, 0.0713, 0.4007, 0.1466, 0.2824, -0.0231, 0.0408]
+            if is_bimanual:
                 left_arm.refresh_all()
                 left_arm.recv_all()
-                left_state = read_arm_state(left_arm)  # 8 values, radians
-
-            # ── 3. Build 32-dim state vector ─────────────────────────────────
-            # Dataset layout: [left 0:8][right 8:16][ee_pose 16:30][grip 30:32]
-            state = np.zeros(32, dtype=np.float32)
-            state[0:8]  = left_state   # left arm  (zeros if right-only)
-            state[8:16] = right_state  # right arm
-            # indices 16:32 = ee_pose + gripper_state (leave as zero)
-
-            # ── 4. Policy inference ──────────────────────────────────────────
-            state_t = torch.tensor(state, dtype=torch.float32)
-            if torch.cuda.is_available():
-                state_t = state_t.cuda()
-
-            obs = {
-                "observation.images.main_camera":  img_to_tensor(f_main),
-                "observation.images.right_camera": img_to_tensor(f_right),
-                "observation.images.left_camera":  img_to_tensor(f_left),
-                "observation.state": state_t.unsqueeze(0),
-            }
-
-            with torch.inference_mode():
-                action = policy.select_action(obs).squeeze(0).cpu().numpy()
-            # action layout: [left 0:8][right 8:16] — matches state layout
-
-            # ── 5. Send commands ─────────────────────────────────────────────
-            right_action = action[8:16]
-            send_arm_action(right_arm, right_action)
-
-            if left_arm is not None:
-                left_action = action[0:8]
-                send_arm_action(left_arm, left_action)
-
-            # ── 6. Debug print every 10 steps ────────────────────────────────
+                left_st = read_arm_state(left_arm)
+                
+            # Update shared state for inference
+            with shared_lock:
+                shared_right_state = right_st
+                shared_left_state = left_st
+                target_act = shared_target_action
+                
+            # 2. Interpolate and send action
+            if target_act is not None:
+                right_target = target_act[8:16]
+                left_target = target_act[0:8]
+                
+                # Initialize smoothing from current position to avoid initial jump
+                if current_action_right is None:
+                    current_action_right = np.array(right_st, dtype=np.float32)
+                if current_action_left is None and is_bimanual:
+                    current_action_left = np.array(left_st, dtype=np.float32)
+                    
+                # Smooth pursuit
+                current_action_right += alpha * (right_target - current_action_right)
+                send_arm_action(right_arm, current_action_right)
+                
+                if is_bimanual:
+                    current_action_left += alpha * (left_target - current_action_left)
+                    send_arm_action(left_arm, current_action_left)
+                    
+            # Debug print
             step += 1
-            if step % 10 == 1:
-                delta = [right_action[i] - right_state[i] for i in range(7)]
-                print(f"Step {step:4d} | "
-                      f"right_pos: {[f'{v:.3f}' for v in right_state[:7]]} | "
-                      f"action: {[f'{v:.3f}' for v in right_action[:7]]} | "
+            if step % int(CONTROL_HZ) == 1 and target_act is not None:
+                delta = [right_target[i] - right_st[i] for i in range(7)]
+                print(f"Step {step:5d} | "
+                      f"pos: {[f'{v:.3f}' for v in right_st[:7]]} | "
+                      f"tgt: {[f'{v:.3f}' for v in right_target[:7]]} | "
                       f"delta: {[f'{v:.3f}' for v in delta]}")
 
-            # ── 7. Rate control ──────────────────────────────────────────────
+            # Rate control
             elapsed = time.time() - t0
-            sleep_t = (1.0 / CONTROL_HZ) - elapsed
+            sleep_t = dt - elapsed
             if sleep_t > 0:
                 time.sleep(sleep_t)
 
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
+        inference_running = False
         print("Disabling motors...")
         right_arm.disable_all()
         right_arm.recv_all()
