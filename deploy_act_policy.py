@@ -14,6 +14,8 @@ import threading
 import cv2
 import torch
 import numpy as np
+import yaml
+from pathlib import Path
 from lerobot.policies.act.modeling_act import ACTPolicy
 import openarm_can as oa
 
@@ -23,6 +25,13 @@ RIGHT_CAN  = "can0"
 LEFT_CAN   = "can1"
 INFERENCE_HZ = 30    # Dataset was recorded at 30 fps; model assumes 30Hz temporal ensembling
 CONTROL_HZ   = 100   # High-frequency motor control loop for smooth interpolation
+GRIPPER_HOME_PATH = Path(__file__).with_name("gripper_home.yaml")
+
+# Match the ROS 2 OpenArm hardware mapping used during exoskeleton training.
+# Actions record gripper as normalized opening: 0.0=closed, 1.0=open.
+# Observations record finger_joint1 in meters: 0.0=closed, 0.044=open.
+GRIPPER_OPEN_JOINT_M = 0.044
+GRIPPER_OPEN_MOTOR_DELTA_RAD = -1.0472
 
 # Motor types per arm (J1-J7)
 MOTOR_TYPES = [
@@ -73,17 +82,51 @@ def init_arm(can_port):
     arm.recv_all(100)
     return arm
 
-def read_arm_state(arm):
-    """Return [j1..j7, gripper] positions in radians."""
+def load_gripper_homes(path=GRIPPER_HOME_PATH):
+    """Return closed gripper motor positions saved by save_gripper_home.py."""
+    defaults = {"left": 0.0, "right": 0.0}
+    if not path.exists():
+        print(f"WARNING: {path} not found; using 0.0 rad as closed gripper home.")
+        return defaults
+
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    homes = data.get("gripper_home", {})
+    return {
+        "left": float(homes.get("left_arm_can1", defaults["left"])),
+        "right": float(homes.get("right_arm_can0", defaults["right"])),
+    }
+
+def gripper_motor_to_joint_m(motor_pos, closed_motor_pos):
+    """Convert absolute gripper motor radians to dataset/ROS finger aperture in meters."""
+    open_fraction = (float(motor_pos) - closed_motor_pos) / GRIPPER_OPEN_MOTOR_DELTA_RAD
+    return float(np.clip(open_fraction, 0.0, 1.0) * GRIPPER_OPEN_JOINT_M)
+
+def gripper_action_to_motor(action_value, closed_motor_pos):
+    """Convert model gripper action 0..1 opening fraction to absolute motor radians."""
+    open_fraction = float(np.clip(action_value, 0.0, 1.0))
+    return closed_motor_pos + open_fraction * GRIPPER_OPEN_MOTOR_DELTA_RAD
+
+def observation_to_action_seed(state8):
+    """Use current observed aperture as the initial 0..1 gripper action for smoothing."""
+    seed = np.array(state8, dtype=np.float32)
+    seed[7] = float(np.clip(seed[7] / GRIPPER_OPEN_JOINT_M, 0.0, 1.0))
+    return seed
+
+def read_arm_state(arm, gripper_closed_motor_pos):
+    """Return [j1..j7, gripper] in the same units as the LeRobot dataset."""
     pos = [m.get_position() for m in arm.get_arm().get_motors()]
-    pos.append(arm.get_gripper().get_motors()[0].get_position())
+    gripper_motor = arm.get_gripper().get_motors()[0].get_position()
+    pos.append(gripper_motor_to_joint_m(gripper_motor, gripper_closed_motor_pos))
     return pos  # length 8
 
-def send_arm_action(arm, action8):
-    """Send 8-element radian action to arm + gripper via MIT control."""
+def send_arm_action(arm, action8, gripper_closed_motor_pos):
+    """Send 8-element policy action to arm + gripper via MIT control."""
     cmds = [oa.MITParam(KP[i], KD[i], float(action8[i]), 0.0, 0.0) for i in range(7)]
     arm.get_arm().mit_control_all(cmds)
-    arm.get_gripper().mit_control_all([oa.MITParam(KP[7], KD[7], float(action8[7]), 0.0, 0.0)])
+    gripper_motor_target = gripper_action_to_motor(action8[7], gripper_closed_motor_pos)
+    arm.get_gripper().mit_control_all([oa.MITParam(KP[7], KD[7], gripper_motor_target, 0.0, 0.0)])
     arm.recv_all()
 
 def img_to_tensor(frame):
@@ -189,6 +232,12 @@ def main():
     stats = safetensors.torch.load_file(stats_path)
     print("Loaded normalization stats from safetensors.")
 
+    gripper_homes = load_gripper_homes()
+    print(
+        "Loaded closed gripper homes: "
+        f"left={gripper_homes['left']:.4f} rad, right={gripper_homes['right']:.4f} rad"
+    )
+
     # Init hardware
     print("Initializing right arm (can0)...")
     right_arm = init_arm(RIGHT_CAN)
@@ -201,7 +250,7 @@ def main():
 
     print("Starting cameras (main, right, left)...")
     cam_main  = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:4.1:1.3-video-index0")
-    cam_right = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.1.1:1.0-video-index0")
+    cam_right = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:2.1.1:1.0-video-index0")
     cam_left  = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:9.1:1.0-video-index0")
     time.sleep(1.0)  # warmup
 
@@ -231,13 +280,13 @@ def main():
             # 1. Read hardware state
             right_arm.refresh_all()
             right_arm.recv_all()
-            right_st = read_arm_state(right_arm)
+            right_st = read_arm_state(right_arm, gripper_homes["right"])
             
             left_st = [-0.0091, -0.0444, 0.0713, 0.4007, 0.1466, 0.2824, -0.0231, 0.0408]
             if is_bimanual:
                 left_arm.refresh_all()
                 left_arm.recv_all()
-                left_st = read_arm_state(left_arm)
+                left_st = read_arm_state(left_arm, gripper_homes["left"])
                 
             # Update shared state for inference
             with shared_lock:
@@ -247,22 +296,26 @@ def main():
                 
             # 2. Interpolate and send action
             if target_act is not None:
-                right_target = target_act[8:16]
-                left_target = target_act[0:8]
+                right_target = target_act[8:16].copy()
+                left_target = target_act[0:8].copy()
+                right_target[7] = float(np.clip(right_target[7], 0.0, 1.0))
+                left_target[7] = float(np.clip(left_target[7], 0.0, 1.0))
                 
                 # Initialize smoothing from current position to avoid initial jump
                 if current_action_right is None:
-                    current_action_right = np.array(right_st, dtype=np.float32)
+                    current_action_right = observation_to_action_seed(right_st)
                 if current_action_left is None and is_bimanual:
-                    current_action_left = np.array(left_st, dtype=np.float32)
+                    current_action_left = observation_to_action_seed(left_st)
                     
                 # Smooth pursuit
                 current_action_right += alpha * (right_target - current_action_right)
-                send_arm_action(right_arm, current_action_right)
+                current_action_right[7] = float(np.clip(current_action_right[7], 0.0, 1.0))
+                send_arm_action(right_arm, current_action_right, gripper_homes["right"])
                 
                 if is_bimanual:
                     current_action_left += alpha * (left_target - current_action_left)
-                    send_arm_action(left_arm, current_action_left)
+                    current_action_left[7] = float(np.clip(current_action_left[7], 0.0, 1.0))
+                    send_arm_action(left_arm, current_action_left, gripper_homes["left"])
                     
             # Debug print
             step += 1
@@ -271,7 +324,8 @@ def main():
                 print(f"Step {step:5d} | "
                       f"pos: {[f'{v:.3f}' for v in right_st[:7]]} | "
                       f"tgt: {[f'{v:.3f}' for v in right_target[:7]]} | "
-                      f"delta: {[f'{v:.3f}' for v in delta]}")
+                      f"delta: {[f'{v:.3f}' for v in delta]} | "
+                      f"grip_m={right_st[7]:.3f} grip_cmd={current_action_right[7]:.3f}")
 
             # Rate control
             elapsed = time.time() - t0
