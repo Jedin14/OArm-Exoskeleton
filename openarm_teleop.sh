@@ -304,6 +304,7 @@ cleanup_previous_teleop_processes() {
         "joint_state_broadcaster"
         "rviz2"
         "openarm_teleop.sh --"
+        "deploy_act_policy.py"
     )
 
     local pat

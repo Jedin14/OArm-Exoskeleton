@@ -19,6 +19,9 @@ from pathlib import Path
 from lerobot.policies.act.modeling_act import ACTPolicy
 import openarm_can as oa
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"PyTorch using device: {DEVICE}")
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 MODEL_PATH = "/home/jed/openarm_models/act_packet200/checkpoints/100000/pretrained_model"
 RIGHT_CAN  = "can0"
@@ -49,6 +52,10 @@ KD = [  5.0,   5.0,   3.0,   5.0,  0.3,  0.3,  0.3,  0.3]
 # ── Camera ────────────────────────────────────────────────────────────────────
 class Camera:
     def __init__(self, dev):
+        import os
+        if isinstance(dev, str) and os.path.exists(dev):
+            dev = os.path.realpath(dev)
+            
         self.cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -135,9 +142,7 @@ def img_to_tensor(frame):
     # corrupted colors and outputs chaotic actions.
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     t = torch.from_numpy(frame_rgb).permute(2, 0, 1).float() / 255.0
-    if torch.cuda.is_available():
-        t = t.cuda()
-    return t.unsqueeze(0)
+    return t.to(DEVICE).unsqueeze(0)
 
 
 # ── Thread Shared State ───────────────────────────────────────────────────────
@@ -152,10 +157,10 @@ def inference_worker(policy, cam_main, cam_right, cam_left, is_bimanual, stats):
     global shared_right_state, shared_left_state, shared_target_action, inference_running
     import openarm_fk
     
-    img_mean = stats["observation.images.main_camera.mean"].cuda()
-    img_std  = stats["observation.images.main_camera.std"].cuda()
-    state_mean = stats["observation.state.mean"].cuda()
-    state_std  = stats["observation.state.std"].cuda()
+    img_mean = stats["observation.images.main_camera.mean"].to(DEVICE)
+    img_std  = stats["observation.images.main_camera.std"].to(DEVICE)
+    state_mean = stats["observation.state.mean"].to(DEVICE)
+    state_std  = stats["observation.state.std"].to(DEVICE)
     act_mean = stats["action.mean"].cpu().numpy()
     act_std  = stats["action.std"].cpu().numpy()
 
@@ -181,9 +186,7 @@ def inference_worker(policy, cam_main, cam_right, cam_left, is_bimanual, stats):
         # Build state
         state = openarm_fk.build_state(left_st, right_st)
         
-        state_t = torch.tensor(state, dtype=torch.float32)
-        if torch.cuda.is_available():
-            state_t = state_t.cuda()
+        state_t = torch.tensor(state, dtype=torch.float32).to(DEVICE)
 
         obs = {
             "observation.images.main_camera":  (img_to_tensor(f_main) - img_mean) / img_std,
@@ -206,8 +209,69 @@ def inference_worker(policy, cam_main, cam_right, cam_left, is_bimanual, stats):
             time.sleep(sleep_t)
 
 
+def kill_conflicting_processes():
+    import os
+    import signal
+    import subprocess
+    print("Checking for conflicting teleop/lelab processes...")
+    patterns = [
+        "ros2 launch qnbot_teleoperator",
+        "ros2 launch openarm_bringup",
+        "websocket_teleoperator",
+        "exo_retargeting_node",
+        "exoskeleton_bridge_node",
+        "ros2_lelab_bridge.py",
+        "lelab",
+        "controller_manager/spawner",
+        "ros2_control_node",
+        "robot_state_publisher",
+        "joint_state_broadcaster",
+        "rviz2",
+        "openarm_teleop.sh"
+    ]
+    
+    current_pid = os.getpid()
+    parent_pid = os.getppid()
+    
+    # Try SIGTERM first
+    for pat in patterns:
+        try:
+            output = subprocess.check_output(["pgrep", "-f", pat], text=True)
+            for pid_str in output.strip().split('\n'):
+                if not pid_str: continue
+                pid = int(pid_str)
+                if pid in (current_pid, parent_pid, 1):
+                    continue
+                print(f"Killing conflicting process {pid} ({pat})")
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+        except subprocess.CalledProcessError:
+            pass
+            
+    time.sleep(1)
+    
+    # Force kill with SIGKILL
+    for pat in patterns:
+        try:
+            output = subprocess.check_output(["pgrep", "-f", pat], text=True)
+            for pid_str in output.strip().split('\n'):
+                if not pid_str: continue
+                pid = int(pid_str)
+                if pid in (current_pid, parent_pid, 1):
+                    continue
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        except subprocess.CalledProcessError:
+            pass
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
+    kill_conflicting_processes()
     global shared_right_state, shared_left_state, shared_target_action, inference_running
 
     parser = argparse.ArgumentParser()
@@ -224,8 +288,7 @@ def main():
     print(f"Loading model from {args.model}...")
     policy = ACTPolicy.from_pretrained(args.model)
     policy.eval()
-    if torch.cuda.is_available():
-        policy.cuda()
+    policy.to(DEVICE)
 
     import safetensors.torch
     stats_path = f"{args.model}/policy_preprocessor_step_3_normalizer_processor.safetensors"
@@ -249,9 +312,9 @@ def main():
         left_arm = init_arm(LEFT_CAN)
 
     print("Starting cameras (main, right, left)...")
-    cam_main  = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:4.1:1.3-video-index0")
-    cam_right = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:2.1.1:1.0-video-index0")
-    cam_left  = Camera("/dev/v4l/by-path/pci-0000:80:14.0-usb-0:9.1:1.0-video-index0")
+    cam_main  = Camera("/dev/main_camera")
+    cam_right = Camera("/dev/right_camera")
+    cam_left  = Camera("/dev/left_camera")
     time.sleep(1.0)  # warmup
 
     print("Starting Inference Thread...")

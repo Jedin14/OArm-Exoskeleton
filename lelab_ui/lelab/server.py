@@ -1383,9 +1383,34 @@ def get_available_cameras():
                         "name": display_name,
                         "device_path": bus_info,
                         "available": True,
+                        "symlink_names": [],
                     }
                 )
 
+            # Scan /dev/ for named symlinks that resolve to a videoN node
+            # (e.g. /dev/left_camera -> video13). Attach them to the matching
+            # camera entry so the frontend can display the friendly alias.
+            try:
+                dev_dir = Path("/dev")
+                index_map = {cam["index"]: cam for cam in cameras}
+                for entry in dev_dir.iterdir():
+                    if not entry.is_symlink():
+                        continue
+                    target = entry.resolve()
+                    target_name = target.name  # e.g. "video13"
+                    if not target_name.startswith("video"):
+                        continue
+                    num_str = target_name[len("video"):]
+                    if not num_str.isdigit():
+                        continue
+                    cam_index = int(num_str)
+                    if cam_index in index_map:
+                        index_map[cam_index].setdefault("symlink_names", []).append(entry.name)
+                # Sort symlink aliases for deterministic output
+                for cam in cameras:
+                    cam["symlink_names"] = sorted(cam.get("symlink_names", []))
+            except Exception as _e:
+                logger.warning("Failed to scan /dev/ for camera symlinks: %s", _e)
 
             return {"status": "success", "cameras": cameras}
 

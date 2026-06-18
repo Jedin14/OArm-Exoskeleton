@@ -6,6 +6,8 @@ export interface AvailableCamera {
   name: string;
   deviceId: string;
   available: boolean;
+  /** Named /dev symlinks pointing at this camera, e.g. ["left_camera"] */
+  symlinkNames: string[];
 }
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -37,6 +39,7 @@ export function useAvailableCameras({
       name: d.label?.trim() || `Camera ${i}`,
       deviceId: d.deviceId,
       available: true,
+      symlinkNames: [] as string[],
     }));
     setCameras(fallback);
     return fallback;
@@ -84,6 +87,7 @@ export function useAvailableCameras({
         name?: string;
         device_path?: string;
         available: boolean;
+        symlink_names?: string[];
       }[] = data.cameras ?? [];
 
       // Browser's MediaDeviceInfo.label starts with AVFoundation's localizedName
@@ -115,6 +119,7 @@ export function useAvailableCameras({
           name: label,
           deviceId: match?.deviceId ?? "",
           available: cam.available,
+          symlinkNames: cam.symlink_names ?? [],
         };
       });
       setCameras(merged);

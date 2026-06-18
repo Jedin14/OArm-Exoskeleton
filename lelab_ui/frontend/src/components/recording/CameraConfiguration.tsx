@@ -211,9 +211,17 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                     >
                       <div className="flex flex-col">
                         <span className="font-medium">{camera.name}</span>
-                        <span className="text-xs text-gray-400">
+                        <span className="text-xs text-gray-400 flex items-center gap-1 flex-wrap">
                           Index {camera.index}
                           {alreadyAdded && " · already added"}
+                          {camera.symlinkNames.map((alias) => (
+                            <span
+                              key={alias}
+                              className="inline-block bg-blue-900/60 text-blue-300 rounded px-1 py-0 leading-4 font-mono"
+                            >
+                              /dev/{alias}
+                            </span>
+                          ))}
                         </span>
                       </div>
                     </SelectItem>

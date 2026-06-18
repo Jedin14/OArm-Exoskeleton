@@ -414,14 +414,30 @@ const InferenceModal: React.FC<Props> = ({
                               No cameras detected
                             </div>
                           ) : (
-                            availableCameras.map((cam) => (
-                              <SelectItem
-                                key={cam.index}
-                                value={String(cam.index)}
-                              >
-                                #{cam.index} — {cam.name}
-                              </SelectItem>
-                            ))
+                            <>
+                              {availableCameras.map((cam) => (
+                                <SelectItem
+                                  key={cam.index}
+                                  value={String(cam.index)}
+                                >
+                                  <div className="flex flex-col">
+                                    <span>#{cam.index} — {cam.name}</span>
+                                    {cam.symlinkNames.length > 0 && (
+                                      <span className="flex items-center gap-1 flex-wrap mt-0.5">
+                                        {cam.symlinkNames.map((alias) => (
+                                          <span
+                                            key={alias}
+                                            className="inline-block bg-blue-900/60 text-blue-300 rounded px-1 py-0 leading-4 font-mono text-[10px]"
+                                          >
+                                            /dev/{alias}
+                                          </span>
+                                        ))}
+                                      </span>
+                                    )}
+                                  </div>
+                                </SelectItem>
+                              ))}
+                            </>
                           )}
                         </SelectContent>
                       </Select>
