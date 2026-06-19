@@ -47,7 +47,7 @@ def _ensure_loaded():
         return
         
     _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    _model = FKNet().to(_device)
+    _model = FKNet().to(_device).to(torch.float32)
     
     weights_path = os.path.join(os.path.dirname(__file__), "fk_mlp.pth")
     if not os.path.exists(weights_path):
