@@ -16,7 +16,7 @@ from control_msgs.action import GripperCommand
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, String
 
 
 class ExoskeletonBridgeNode(Node):
@@ -80,12 +80,20 @@ class ExoskeletonBridgeNode(Node):
         self.boot_homing_gripper_target = float(self.get_parameter('boot_homing_gripper_target').value)
 
         # IO
+        self.teleop_mode = 'idle'  # 'idle', 'teleop', 'replay'
+        self.teleop_mode_sub = self.create_subscription(String, '/teleop_mode', self.teleop_mode_callback, 10)
+
         self.left_arm_sub = self.create_subscription(JointState, '/left_arm/joint_command', self.left_arm_callback, 10)
         self.right_arm_sub = self.create_subscription(JointState, '/right_arm/joint_command', self.right_arm_callback, 10)
+        
+        self.left_replay_sub = self.create_subscription(JointState, '/left_arm/replay_command', self.left_replay_callback, 10)
+        self.right_replay_sub = self.create_subscription(JointState, '/right_arm/replay_command', self.right_replay_callback, 10)
+
         self.joint_states_sub = self.create_subscription(JointState, '/joint_states', self.joint_states_callback, 10)
 
         self.left_arm_pub = self.create_publisher(Float64MultiArray, '/left_forward_position_controller/commands', 10)
         self.right_arm_pub = self.create_publisher(Float64MultiArray, '/right_forward_position_controller/commands', 10)
+        self.cmd_joint_state_pub = self.create_publisher(JointState, '/commanded_joint_states', 10)
 
         self.left_gripper_client = ActionClient(self, GripperCommand, '/left_gripper_controller/gripper_cmd')
         self.right_gripper_client = ActionClient(self, GripperCommand, '/right_gripper_controller/gripper_cmd')
@@ -146,11 +154,47 @@ class ExoskeletonBridgeNode(Node):
             self.get_logger().warn(f'[{name}] non-numeric: {parsed}, fallback to {default}')
             return default
 
+    def teleop_mode_callback(self, msg: String):
+        mode = msg.data.lower()
+        if mode in ['idle', 'teleop', 'replay']:
+            if self.teleop_mode != mode:
+                self.get_logger().info(f'Switching teleop_mode to: {mode}')
+                self.teleop_mode = mode
+                # Stop following previous commands
+                if mode == 'idle':
+                    self.have_input['left'] = False
+                    self.have_input['right'] = False
+
     def left_arm_callback(self, msg: JointState):
-        self._update_input_from_arm_msg('left', msg)
+        if self.teleop_mode == 'teleop':
+            self._update_input_from_arm_msg('left', msg)
 
     def right_arm_callback(self, msg: JointState):
-        self._update_input_from_arm_msg('right', msg)
+        if self.teleop_mode == 'teleop':
+            self._update_input_from_arm_msg('right', msg)
+
+    def left_replay_callback(self, msg: JointState):
+        if self.teleop_mode == 'replay':
+            self._update_input_from_replay_msg('left', msg)
+
+    def right_replay_callback(self, msg: JointState):
+        if self.teleop_mode == 'replay':
+            self._update_input_from_replay_msg('right', msg)
+
+    def _update_input_from_replay_msg(self, side, msg: JointState):
+        if len(msg.position) < 7:
+            return
+        self.input_arm[side] = np.array(msg.position[:7], dtype=float)
+        self.have_input[side] = True
+        if len(msg.position) >= 8:
+            self.input_gripper[side] = float(msg.position[7])
+        elif f'{side}_gripper_joint' in msg.name:
+            try:
+                gripper_idx = msg.name.index(f'{side}_gripper_joint')
+                if gripper_idx < len(msg.position):
+                    self.input_gripper[side] = float(msg.position[gripper_idx])
+            except ValueError:
+                pass
 
     def _update_input_from_arm_msg(self, side, msg: JointState):
         if len(msg.position) < 7:
@@ -329,6 +373,17 @@ class ExoskeletonBridgeNode(Node):
 
             self._publish_arm(side, self.cmd_arm[side])
             self._send_gripper_action(side, self.cmd_gripper[side], now_sec)
+
+        # Publish the smoothed commanded joint states so the recording app captures targets, not sagging actuals.
+        cmd_msg = JointState()
+        cmd_msg.header.stamp = self.get_clock().now().to_msg()
+        for side in ('left', 'right'):
+            for i in range(7):
+                cmd_msg.name.append(f'openarm_{side}_joint{i+1}')
+                cmd_msg.position.append(self.cmd_arm[side][i])
+            cmd_msg.name.append(f'openarm_{side}_finger_joint1')
+            cmd_msg.position.append(self.cmd_gripper[side])
+        self.cmd_joint_state_pub.publish(cmd_msg)
 
 
 def main(args=None):

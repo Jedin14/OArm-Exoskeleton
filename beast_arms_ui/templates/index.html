@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beast Arms - Object Picker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="background-mesh"></div>
+    
+    <div class="container">
+        <header class="glass-panel main-header">
+            <h1 class="logo-text">BEAST <span class="accent">ARMS</span></h1>
+            <div style="display: flex; gap: 1rem; align-items: center;">
+                <button id="teleop-toggle-btn" class="btn btn-outline" style="border-color: var(--danger); color: var(--danger);">Teleop: OFF</button>
+                <button id="admin-toggle-btn" class="btn btn-outline">Admin Panel</button>
+            </div>
+        </header>
+
+        <main class="content-grid">
+            <!-- Left Side: Selection -->
+            <section class="selection-area glass-panel">
+                <h2>1. Select Object</h2>
+                <div class="grid objects-grid" id="objects-container">
+                    <!-- Objects injected by JS -->
+                </div>
+
+                <h2>2. Select Point</h2>
+                <div class="grid points-grid" id="points-container">
+                    <!-- Points injected by JS -->
+                </div>
+            </section>
+
+            <!-- Right Side: Controls -->
+            <section class="controls-area glass-panel">
+                <h2>Active Combination</h2>
+                <div class="active-combo" id="active-combo-display">
+                    <span class="placeholder">Select an object and point</span>
+                </div>
+
+                <div class="action-buttons">
+                    <button id="pick-btn" class="btn btn-primary" disabled>
+                        <span class="icon">▶</span> Pick Object
+                    </button>
+                </div>
+                
+                <div id="status-message" class="status-message"></div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Admin Modal -->
+    <div id="admin-modal" class="modal">
+        <div class="modal-content glass-panel">
+            <div class="modal-header">
+                <h2>Admin Panel</h2>
+                <button id="close-modal-btn" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body grid-admin">
+                <div class="admin-section">
+                    <h3>Add Object</h3>
+                    <div class="form-group">
+                        <label>Object Name</label>
+                        <input type="text" id="new-obj-name" placeholder="e.g. Wrench">
+                    </div>
+                    <div class="form-group">
+                        <label>Image Filename</label>
+                        <input type="text" id="new-obj-image" placeholder="e.g. wrench.jpeg">
+                        <small>Image must exist in object_images directory.</small>
+                    </div>
+                    <button id="add-obj-btn" class="btn btn-sm">Add Object</button>
+                </div>
+                
+                <div class="admin-section">
+                    <h3>Add Point</h3>
+                    <div class="form-group">
+                        <label>Point Name</label>
+                        <input type="text" id="new-pt-name" placeholder="e.g. Point D">
+                    </div>
+                    <button id="add-pt-btn" class="btn btn-sm">Add Point</button>
+                </div>
+                <div class="admin-section">
+                    <h3>Record Trajectory</h3>
+                    <div class="form-group">
+                        <label>Object</label>
+                        <select id="record-obj-select" class="form-select"></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Point</label>
+                        <select id="record-pt-select" class="form-select"></select>
+                    </div>
+                    <div id="admin-record-status" style="margin-bottom: 1rem; font-weight: bold; font-size: 0.9rem;"></div>
+                    <div style="display:flex; gap:0.5rem; align-items:flex-start;">
+                        <button id="admin-record-btn" class="btn btn-primary" disabled style="flex:1;">
+                            <span class="icon">●</span> Start Recording
+                        </button>
+                        <button id="admin-cancel-btn" class="btn btn-outline" style="display:none; flex:1; padding:0.8rem; border-color:var(--danger); color:var(--danger);">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="modal-body" style="border-top: 1px solid var(--border-color); padding-top: 1.5rem;">
+                <h3>Manage Trajectories</h3>
+                <div id="trajectories-list" style="margin-top: 1rem; max-height: 200px; overflow-y: auto;">
+                    <!-- List items with delete buttons -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

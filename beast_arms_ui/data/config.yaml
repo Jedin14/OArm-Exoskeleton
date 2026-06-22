@@ -1,0 +1,18 @@
+objects:
+  - id: obj_screwdriver
+    name: Screwdriver
+    image: screwdriver.jpeg
+  - id: obj_motor
+    name: Motor
+    image: motor.jpeg
+  - id: obj_switch
+    name: Switch
+    image: switch.jpeg
+
+points:
+  - id: pt_A
+    name: Point A
+  - id: pt_B
+    name: Point B
+  - id: pt_C
+    name: Point C

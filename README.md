@@ -114,3 +114,9 @@ You can adjust the following parameters inside the `teleop_sim_full.launch.py` o
 [8:16] = right joint positions (radians)
 [16:30] = ee_pose: [left_x, y, z, qx, qy, qz, qw, right_x, y, z, qx, qy, qz, qw]
 [30:32] = gripper_state: [left_finger, right_finger]
+
+
+Record & Play:
+
+~/openarm_teleop/beast_arms_ui$ python3 app.py
+~/openarm_teleop$ ./openarm_teleop.sh --real --ws-port 19191
