@@ -40,7 +40,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 from sensor_msgs.msg import JointState, Joy
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 
 from .protocol import ExoProtocolParser
 
@@ -201,6 +201,19 @@ class WebSocketTeleoperator(Node):
             'dropped_by_switch_check': 0,  # 因 Switch 检查而丢弃的数据
         }
         
+        self.left_fixed_home = False
+        self.right_fixed_home = False
+        self.home_all_active = False
+        self.last_published_positions = [0.0] * 16
+        
+        # 订阅UI控制命令
+        self.ui_command_sub = self.create_subscription(
+            String,
+            '/exo/ui_command',
+            self.ui_command_callback,
+            10
+        )
+
         # 频率限制配置（100Hz = 10ms间隔）
         self.max_publish_rate_hz = 100.0
         self.min_publish_interval = 1.0 / self.max_publish_rate_hz  # 0.01秒 = 10ms
@@ -237,6 +250,22 @@ class WebSocketTeleoperator(Node):
             f'\n  🚫 回零功能已禁用（需要插值安全机制）'
         )
     
+    def ui_command_callback(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            action = data.get('action')
+            if action == 'toggle_left_home':
+                self.left_fixed_home = bool(data.get('value', False))
+                self.get_logger().info(f"UI Command: Left arm home fixed = {self.left_fixed_home}")
+            elif action == 'toggle_right_home':
+                self.right_fixed_home = bool(data.get('value', False))
+                self.get_logger().info(f"UI Command: Right arm home fixed = {self.right_fixed_home}")
+            elif action == 'home_all':
+                self.home_all_active = True
+                self.get_logger().info("UI Command: Home all active")
+        except Exception as e:
+            self.get_logger().error(f"Error parsing ui_command: {e}")
+
     def init_joint_command_template(self):
         """初始化关节命令模板，包含16个关节（左臂7个+右臂7个+左扳机+右扳机）"""
         # 默认关节位置：16个关节（仅用于回零）
@@ -511,6 +540,12 @@ class WebSocketTeleoperator(Node):
                     self.get_logger().debug(f"🚫 Switch 检查未通过，数据未转发 (左: {left_switch}, 右: {right_switch})")
                 return
             
+
+            
+            # The exoskeleton_bridge_node already handles smooth interpolation for all
+            # sudden command changes (including locking/unlocking and boot), so we don't
+            # need a custom interpolation loop here.
+
             # 立即发布关节命令和摇杆数据
             self.publish_joint_command(joint_positions)
             self.publish_gamepad_keys(joystick_data)

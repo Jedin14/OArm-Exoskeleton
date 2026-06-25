@@ -109,6 +109,9 @@ const Recording = () => {
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [muted, setMutedState] = useState<boolean>(() => getMuted());
+  const [leftArmFixed, setLeftArmFixed] = useState(false);
+  const [rightArmFixed, setRightArmFixed] = useState(false);
+  const [isTriggeringHome, setIsTriggeringHome] = useState(false);
   const prevRealPhaseRef = useRef<Phase | null>(null);
   // Bumps on each re-record so the auto-advance warning re-fires for the same episode number.
   const [rerecordTick, setRerecordTick] = useState(0);
@@ -163,6 +166,53 @@ const Recording = () => {
       toast({ title: "Connection Error", description: "Could not connect to backend", variant: "destructive" });
     } finally {
       setIsUpdatingTask(false);
+    }
+  };
+
+  const handleToggleLeftArm = async () => {
+    const nextState = !leftArmFixed;
+    setLeftArmFixed(nextState);
+    try {
+      await fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, {
+        method: "POST",
+        body: JSON.stringify({ fixed: nextState }),
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleToggleRightArm = async () => {
+    const nextState = !rightArmFixed;
+    setRightArmFixed(nextState);
+    try {
+      await fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, {
+        method: "POST",
+        body: JSON.stringify({ fixed: nextState }),
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleTriggerHome = async () => {
+    setIsTriggeringHome(true);
+    setLeftArmFixed(true);
+    setRightArmFixed(true);
+    try {
+      await fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, {
+        method: "POST",
+        body: JSON.stringify({ fixed: true })
+      });
+      await fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, {
+        method: "POST",
+        body: JSON.stringify({ fixed: true })
+      });
+      toast({ title: "Arms Locked to Home", description: "Both arms are securely locked to home. Click the unlock buttons to release them." });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setTimeout(() => setIsTriggeringHome(false), 2000);
     }
   };
 
@@ -682,6 +732,36 @@ const Recording = () => {
                  Currently recording as: <br/><strong>{backendStatus.current_task}</strong>
                </div>
             )}
+          </div>
+
+          <div className="mb-8 p-4 bg-gray-800/50 rounded-xl border border-gray-700">
+            <div className="text-sm text-gray-400 mb-2 font-semibold">Arm Homing Controls</div>
+            <div className="flex flex-col gap-3">
+              <div className="flex gap-4">
+                <Button 
+                  onClick={handleToggleLeftArm} 
+                  variant={leftArmFixed ? "default" : "secondary"}
+                  className={`flex-1 ${leftArmFixed ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                >
+                  {leftArmFixed ? "Unlock Left Arm" : "Lock Left to Home"}
+                </Button>
+                <Button 
+                  onClick={handleToggleRightArm} 
+                  variant={rightArmFixed ? "default" : "secondary"}
+                  className={`flex-1 ${rightArmFixed ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
+                >
+                  {rightArmFixed ? "Unlock Right Arm" : "Lock Right to Home"}
+                </Button>
+              </div>
+              <Button 
+                onClick={handleTriggerHome} 
+                disabled={isTriggeringHome}
+                variant="outline"
+                className="w-full bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700 hover:text-white"
+              >
+                Home Both Arms Now
+              </Button>
+            </div>
           </div>
 
           <div className="flex flex-col gap-4">

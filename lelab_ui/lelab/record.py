@@ -1050,6 +1050,13 @@ def custom_record_loop(
         # Get robot observation
         obs = robot.get_observation()
 
+        # Auto-pause if any camera is frozen
+        if hasattr(robot, "_camera_frozen") and any(robot._camera_frozen.values()):
+            if not events.get("pause_recording", False):
+                logger.warning("Camera frozen! Auto-pausing recording to prevent corrupted data.")
+                print("\n⚠️ STATUS CHANGE: Auto-paused due to camera freeze. Please check the UI and reconnect cameras.")
+                events["pause_recording"] = True
+
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
 

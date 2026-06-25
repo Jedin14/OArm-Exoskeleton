@@ -109,6 +109,17 @@ class ExoskeletonBridgeNode(Node):
         self.boot_start_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
         self.boot_start_gripper = {'left': 0.0, 'right': 0.0}
 
+        # UI command states for fixed home lock
+        self.left_fixed_home = False
+        self.right_fixed_home = False
+        self.lock_state = {'left': False, 'right': False}
+        self.transition_start_time = {'left': 0.0, 'right': 0.0}
+        self.transition_start_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
+        self.transition_start_gripper = {'left': 0.0, 'right': 0.0}
+        from std_msgs.msg import String
+        import json
+        self.ui_command_sub = self.create_subscription(String, '/exo/ui_command', self.ui_command_callback, 10)
+
         self.last_control_time = None
         self.last_gripper_sent = {'left': 0.0, 'right': 0.0}
         self.last_gripper_sent_time = {'left': 0.0, 'right': 0.0}
@@ -127,6 +138,20 @@ class ExoskeletonBridgeNode(Node):
             f'  right_joint_multipliers: {self.right_joint_multipliers}\n'
             f'  left_gripper_reverse: {self.left_gripper_reverse}, right_gripper_reverse: {self.right_gripper_reverse}'
         )
+
+    def ui_command_callback(self, msg):
+        import json
+        try:
+            data = json.loads(msg.data)
+            action = data.get('action')
+            if action == 'toggle_left_home':
+                self.left_fixed_home = bool(data.get('value', False))
+                self.get_logger().info(f"UI Command: Left arm home fixed = {self.left_fixed_home}")
+            elif action == 'toggle_right_home':
+                self.right_fixed_home = bool(data.get('value', False))
+                self.get_logger().info(f"UI Command: Right arm home fixed = {self.right_fixed_home}")
+        except Exception as e:
+            self.get_logger().error(f"Error parsing ui_command: {e}")
 
     def _parse_joint_multipliers(self, raw_value, name):
         default = [1.0] * 7
@@ -310,8 +335,36 @@ class ExoskeletonBridgeNode(Node):
 
         # Follow mode
         for side in ('left', 'right'):
-            desired_arm = self.input_arm[side] if self.have_input[side] else self.cmd_arm[side]
-            desired_gripper = self.input_gripper[side] if self.have_input[side] else self.cmd_gripper[side]
+            is_locked = (side == 'left' and self.left_fixed_home) or (side == 'right' and self.right_fixed_home)
+            
+            # Detect state change
+            if is_locked != self.lock_state[side]:
+                self.lock_state[side] = is_locked
+                self.transition_start_time[side] = now_sec
+                self.transition_start_arm[side] = self.cmd_arm[side].copy()
+                self.transition_start_gripper[side] = self.cmd_gripper[side]
+                action_str = "Locking to home" if is_locked else "Unlocking to exoskeleton"
+                self.get_logger().info(f"{side.capitalize()} arm: {action_str} with {self.boot_homing_duration_sec}s slow transition.")
+
+            # Calculate raw target based on lock state
+            if is_locked:
+                target_arm = np.array(self.boot_homing_arm_target, dtype=float)
+                target_gripper = float(
+                    np.clip(self.boot_homing_gripper_target, self.gripper_min_position_m, self.gripper_max_position_m)
+                )
+            else:
+                target_arm = self.input_arm[side] if self.have_input[side] else self.cmd_arm[side]
+                target_gripper = self.input_gripper[side] if self.have_input[side] else self.cmd_gripper[side]
+
+            # Apply slow transition if within the 3 second window
+            time_since_transition = now_sec - self.transition_start_time[side]
+            if time_since_transition < self.boot_homing_duration_sec:
+                progress = time_since_transition / self.boot_homing_duration_sec
+                desired_arm = (1.0 - progress) * self.transition_start_arm[side] + progress * target_arm
+                desired_gripper = (1.0 - progress) * self.transition_start_gripper[side] + progress * target_gripper
+            else:
+                desired_arm = target_arm
+                desired_gripper = target_gripper
 
             # No negative-position overshoot: the hardware linear formula maps
             # negative joint values to the wrong (opening) motor direction.

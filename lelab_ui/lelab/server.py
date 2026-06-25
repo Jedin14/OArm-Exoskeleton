@@ -135,6 +135,9 @@ class StartVisualizerRequest(BaseModel):
     dataset_repo_id: str
     episode_index: int | None = None
 
+class ToggleArmHomeRequest(BaseModel):
+    fixed: bool
+
 
 def _video_sort_key(path: Path) -> tuple[int, int]:
     chunk_match = _CHUNK_RE.search(str(path.parent))
@@ -529,6 +532,37 @@ def recording_toggle_pause():
 
 
 
+@app.post("/toggle-left-arm-home")
+def toggle_left_arm_home(req: ToggleArmHomeRequest):
+    import subprocess
+    import json
+    import os
+    cmd_str = json.dumps({"action": "toggle_left_home", "value": req.fixed})
+    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+    subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+    return {"success": True}
+
+@app.post("/toggle-right-arm-home")
+def toggle_right_arm_home(req: ToggleArmHomeRequest):
+    import subprocess
+    import json
+    import os
+    cmd_str = json.dumps({"action": "toggle_right_home", "value": req.fixed})
+    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+    subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+    return {"success": True}
+
+@app.post("/trigger-home")
+def trigger_home():
+    import subprocess
+    import json
+    import os
+    cmd_str = json.dumps({"action": "home_all"})
+    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+    subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+    return {"success": True}
+
+
 @app.post("/stop-and-home")
 def stop_and_home():
     """Stop all tasks and smoothly move arms to home, then shut down."""
@@ -564,11 +598,40 @@ def get_recording_camera(cam_name: str):
     if not hasattr(active_robot, "get_latest_frame_jpeg"):
         return Response(status_code=501, content="Robot backend does not support JPEG streaming")
 
-    jpeg_bytes = active_robot.get_latest_frame_jpeg(cam_name)
+    result = active_robot.get_latest_frame_jpeg(cam_name)
+    if not result:
+        return Response(status_code=404, content=f"No frame available for {cam_name}")
+    
+    # Handle both new tuple format (bytes, bool) and old format (bytes)
+    is_frozen = False
+    if isinstance(result, tuple):
+        jpeg_bytes, is_frozen = result
+    else:
+        jpeg_bytes = result
+
     if not jpeg_bytes:
         return Response(status_code=404, content=f"No frame available for {cam_name}")
 
-    return Response(content=jpeg_bytes, media_type="image/jpeg")
+    headers = {}
+    if is_frozen:
+        headers["X-Camera-Frozen"] = "true"
+
+    return Response(content=jpeg_bytes, media_type="image/jpeg", headers=headers)
+
+
+@app.post("/reconnect-cameras")
+def reconnect_cameras():
+    """Reconnect all cameras to recover from hardware freezes"""
+    from lelab.record import active_robot, recording_active
+    
+    if not recording_active or not active_robot:
+        return {"success": False, "message": "Recording not active"}
+        
+    if hasattr(active_robot, "reconnect_cameras"):
+        active_robot.reconnect_cameras()
+        return {"success": True, "message": "Cameras reconnected"}
+    
+    return {"success": False, "message": "Robot does not support camera reconnection"}
 
 
 @app.post("/upload-dataset")

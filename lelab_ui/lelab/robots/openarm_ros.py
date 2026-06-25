@@ -85,6 +85,7 @@ class OpenArmRosRobot(Robot):
         # Buffer for latest JPEG frames for web preview
         self._latest_frames = {}
         self._frames_lock = threading.Lock()
+        self._camera_frozen = {}
 
         for name in self.config.joint_names:
             self._latest_obs[f"{name}.pos"] = 0.0
@@ -208,6 +209,22 @@ class OpenArmRosRobot(Robot):
     def configure(self) -> None:
         pass
         
+    def reconnect_cameras(self) -> None:
+        """Disconnect and reconnect all cameras to recover from hardware freezes."""
+        with self._frames_lock:
+            for cam_key, cam in self.cameras.items():
+                logger.info(f"Reconnecting camera {cam_key}...")
+                try:
+                    cam.disconnect()
+                except Exception as e:
+                    logger.debug(f"Disconnect error during reconnect for {cam_key}: {e}")
+                
+                try:
+                    cam.connect()
+                    self._camera_frozen[cam_key] = False
+                except Exception as e:
+                    logger.error(f"Failed to reconnect camera {cam_key}: {e}")
+        
     @check_if_not_connected
     def get_observation(self):
         obs = self._latest_obs.copy()
@@ -216,8 +233,10 @@ class OpenArmRosRobot(Robot):
         for cam_key, cam in self.cameras.items():
             try:
                 frame = cam.read_latest(max_age_ms=2000)
+                self._camera_frozen[cam_key] = False
             except (TimeoutError, RuntimeError) as e:
                 logger.warning(f"Failed to read from {cam_key}, reusing previous frame. Error: {e}")
+                self._camera_frozen[cam_key] = True
                 frame = self._latest_obs.get(cam_key, None)
                 if frame is None:
                     # If we don't even have a first frame, we have to crash
@@ -241,10 +260,10 @@ class OpenArmRosRobot(Robot):
             
         return obs
 
-    def get_latest_frame_jpeg(self, cam_key: str) -> bytes | None:
-        """Return the latest JPEG-encoded frame for a given camera key, or None."""
+    def get_latest_frame_jpeg(self, cam_key: str) -> tuple[bytes | None, bool]:
+        """Return a tuple (jpeg_bytes, is_frozen) for a given camera key."""
         with self._frames_lock:
-            return self._latest_frames.get(cam_key)
+            return self._latest_frames.get(cam_key), self._camera_frozen.get(cam_key, False)
 
     def get_joint_positions(self) -> dict[str, float]:
         """Return a clean dict of joint_name -> position (without .pos suffix)."""
