@@ -31,6 +31,10 @@ interface CameraConfigurationProps {
   onCamerasChange: (cameras: CameraConfig[]) => void;
   releaseStreamsRef?: React.MutableRefObject<(() => void) | null>; // Ref to expose stream release function
   suggestedCameraNames?: string[];
+  // When resuming an existing dataset the camera set is fixed and must match
+  // the dataset, so the editor is collapsed to a read-only summary (with an
+  // opt-in "Edit cameras" escape hatch for re-binding physical devices).
+  locked?: boolean;
 }
 
 const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
@@ -38,8 +42,12 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
   onCamerasChange,
   releaseStreamsRef,
   suggestedCameraNames = [],
+  locked = false,
 }) => {
   const { toast } = useToast();
+
+  const [editUnlocked, setEditUnlocked] = useState(false);
+  const showEditor = !locked || editUnlocked;
 
   const {
     cameras: availableCameras,
@@ -170,11 +178,63 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2">
-        Camera Configuration
-      </h3>
+      <div className="flex items-center justify-between border-b border-gray-700 pb-2">
+        <h3 className="text-lg font-semibold text-white">
+          Camera Configuration
+        </h3>
+        {locked && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="border-gray-600 text-gray-200 hover:bg-gray-700"
+            onClick={() => setEditUnlocked((v) => !v)}
+          >
+            {editUnlocked ? "Done editing" : "Edit cameras"}
+          </Button>
+        )}
+      </div>
+
+      {locked && (
+        <p className="text-xs text-gray-500">
+          Locked to match the existing dataset. The camera set can't change when
+          appending episodes — use <strong>Edit cameras</strong> only to re-bind a
+          physical device.
+        </p>
+      )}
+
+      {/* Read-only summary shown when locked and not explicitly editing */}
+      {!showEditor && (
+        <div className="space-y-2">
+          <h4 className="text-md font-medium text-gray-300">
+            Cameras ({cameras.length})
+          </h4>
+          {cameras.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {cameras.map((camera) => (
+                <div
+                  key={camera.id}
+                  className="flex items-center gap-2 rounded border border-gray-700 bg-gray-800/60 px-3 py-2 text-sm"
+                >
+                  <Camera className="w-4 h-4 text-gray-400 shrink-0" />
+                  <span className="font-medium text-white truncate">
+                    {camera.name}
+                  </span>
+                  <span className="ml-auto text-xs text-gray-500 font-mono">
+                    {camera.width}×{camera.height}
+                    {camera.fps ? ` · ${camera.fps}fps` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">No cameras seeded.</p>
+          )}
+        </div>
+      )}
 
       {/* Add Camera Section */}
+      {showEditor && (
       <div className="bg-gray-800/50 rounded-lg p-4 space-y-4">
         <h4 className="text-md font-medium text-gray-300">Add Camera</h4>
 
@@ -275,9 +335,10 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
           </div>
         </div>
       </div>
+      )}
 
       {/* Configured Cameras */}
-      {cameras.length > 0 && (
+      {showEditor && cameras.length > 0 && (
         <div className="space-y-4">
           <h4 className="text-md font-medium text-gray-300">
             Configured Cameras ({cameras.length})
@@ -297,7 +358,7 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
         </div>
       )}
 
-      {cameras.length === 0 && (
+      {showEditor && cameras.length === 0 && (
         <div className="text-center py-8 text-gray-500">
           <Camera className="w-12 h-12 mx-auto mb-4 text-gray-600" />
           <p>No cameras configured. Add a camera to get started.</p>

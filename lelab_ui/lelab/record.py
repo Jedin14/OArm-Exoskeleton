@@ -78,6 +78,7 @@ class RecordingRequest(BaseModel):
     cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
     dataset_version: str = "v3.0"  # Target version to save dataset in (v2.1 or v3.0)
+    arm_mode: str = "both"  # "left", "right", or "both"
 
 
 class UploadRequest(BaseModel):
@@ -111,6 +112,32 @@ def _extract_camera_names_from_features(features: list[str]) -> list[str]:
         if cam_name and cam_name not in names:
             names.append(cam_name)
     return names
+
+
+def _infer_arm_mode_from_features(features: Any) -> str:
+    """Infer which arms a dataset was recorded with from its feature schema.
+
+    Looks at the per-joint `names` of the `action` feature (falling back to
+    `observation.state`) and checks for `openarm_left_*` / `openarm_right_*`
+    tokens. Returns "both", "left", or "right"; defaults to "both" when the
+    schema can't be interpreted.
+    """
+    names: list[str] = []
+    if isinstance(features, dict):
+        for key in ("action", "observation.state"):
+            feat = features.get(key)
+            if isinstance(feat, dict) and isinstance(feat.get("names"), list):
+                names = [str(n) for n in feat["names"]]
+                break
+
+    joined = " ".join(names).lower()
+    has_left = "openarm_left" in joined
+    has_right = "openarm_right" in joined
+    if has_left and not has_right:
+        return "left"
+    if has_right and not has_left:
+        return "right"
+    return "both"
 
 
 def _resolve_local_dataset_dir(repo_id: str) -> Path | None:
@@ -260,6 +287,7 @@ def _load_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
             "total_frames": int(raw.get("total_frames", 0)),
             "robot_type": raw.get("robot_type", "Unknown robot"),
             "codebase_version": raw.get("codebase_version", "v2.1"),
+            "arm_mode": _infer_arm_mode_from_features(raw.get("features")),
         }
     except Exception as e:
         logger.warning(f"Failed reading local dataset metadata for {repo_id}: {e}")
@@ -319,17 +347,29 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     # 🔧 CAMERA CONFIG CONVERSION: Convert frontend camera dict to proper CameraConfig objects
     camera_configs = {}
     for camera_name, camera_data in request.cameras.items():
+        if request.arm_mode == "left" and "right" in camera_name.lower():
+            continue
+        if request.arm_mode == "right" and "left" in camera_name.lower():
+            continue
+
         if camera_data.get("type") == "opencv":
-            # Convert frontend format to OpenCVCameraConfig
+            # Request MJPG (compressed) by default. USB webcams default to raw
+            # YUYV (~18 MB/s @ 640x480x30), which saturates a shared USB-2 bus
+            # when several cameras stream at once and causes the UVC stalls that
+            # show up as "FROZEN" feeds. MJPG cuts that ~10x. lerobot validates
+            # FOURCC softly (warns + falls back), so a camera that rejects MJPG
+            # keeps working with its default format. Overridable per-camera.
+            fourcc = camera_data.get("fourcc", "MJPG")
             camera_configs[camera_name] = OpenCVCameraConfig(
                 index_or_path=camera_data.get("camera_index", 0),
                 backend=opencv_backend,
                 fps=camera_data.get("fps"),
                 width=camera_data.get("width"),
                 height=camera_data.get("height"),
+                fourcc=fourcc,
             )
             logger.info(
-                f"✅ CAMERA CONFIG: Converted {camera_name} -> OpenCVCameraConfig(index={camera_data.get('camera_index')}, backend={opencv_backend.name}, {camera_data.get('width')}x{camera_data.get('height')}@{camera_data.get('fps')}fps)"
+                f"✅ CAMERA CONFIG: Converted {camera_name} -> OpenCVCameraConfig(index={camera_data.get('camera_index')}, backend={opencv_backend.name}, {camera_data.get('width')}x{camera_data.get('height')}@{camera_data.get('fps')}fps, fourcc={fourcc})"
             )
         else:
             logger.warning(
@@ -342,6 +382,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         # Skip calibration for ROS bridge — it doesn't use lerobot hardware calibration
         robot_config = OpenArmRosRobotConfig(
             cameras=camera_configs,
+            arm_mode=request.arm_mode,
         )
         # We MUST provide a teleop config for lerobot 1.5.0 recording loop
         teleop_config = PassiveROSTeleopConfig()
@@ -452,12 +493,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         logger.info(f"Starting recording for dataset: {request.dataset_repo_id}")
         logger.info(f"Task: {request.single_task}")
 
+        from lelab.server import global_persistent_locks
         recording_config = request
         recording_events = {
             "exit_early": False,  # Right arrow key -> "Skip to next episode" button
             "stop_recording": False,  # ESC key -> "Stop recording" button
             "rerecord_episode": False,  # Left arrow key -> "Re-record episode" button
             "current_task": request.single_task,
+            "persistent_left_lock": global_persistent_locks.get("left", False),
+            "persistent_right_lock": global_persistent_locks.get("right", False),
+            "target_home_state": None,
+            "current_robot_state": None,
         }
 
         record_config = create_record_config(request)
@@ -517,23 +563,35 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     time.sleep(3.0)
 
                 dataset = record_with_web_events(record_config, recording_events, request.dataset_version)
-                logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
-                if hasattr(dataset, "finalize"):
-                    logger.info("Finalizing dataset buffers...")
-                    dataset.finalize()
-                features = list(dataset.features.keys())
-                last_recording_info = {
-                    "success": True,
-                    "dataset_repo_id": request.dataset_repo_id,
-                    "num_episodes": dataset.num_episodes,
-                    "single_task": request.single_task,
-                    "fps": dataset.fps,
-                    "features": features,
-                    "camera_names": _extract_camera_names_from_features(features),
-                    "total_frames": dataset.num_frames,
-                    "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
-                    "codebase_version": request.dataset_version,
-                }
+                if recording_events.get("discard_recording"):
+                    logger.info("Discarding dataset recording as requested...")
+                    if hasattr(dataset, "finalize"):
+                        logger.info("Finalizing dataset buffers before discard...")
+                        dataset.finalize()
+                    import shutil
+                    if dataset.root and dataset.root.exists():
+                        shutil.rmtree(dataset.root, ignore_errors=True)
+                        logger.info(f"Deleted dataset directory {dataset.root}")
+                    current_phase = "discarded"
+                    last_recording_info = {"success": False, "error": "Recording was discarded by user."}
+                else:
+                    logger.info(f"Recording completed successfully. Dataset has {dataset.num_episodes} episodes")
+                    if hasattr(dataset, "finalize"):
+                        logger.info("Finalizing dataset buffers...")
+                        dataset.finalize()
+                    features = list(dataset.features.keys())
+                    last_recording_info = {
+                        "success": True,
+                        "dataset_repo_id": request.dataset_repo_id,
+                        "num_episodes": dataset.num_episodes,
+                        "single_task": request.single_task,
+                        "fps": dataset.fps,
+                        "features": features,
+                        "camera_names": _extract_camera_names_from_features(features),
+                        "total_frames": dataset.num_frames,
+                        "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
+                        "codebase_version": request.dataset_version,
+                    }
             except Exception as e:
                 import traceback
                 with open("/tmp/crash.log", "w") as f:
@@ -544,7 +602,7 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
                 last_recording_info = {"success": False, "error": str(e)}
             finally:
-                if current_phase != "error":
+                if current_phase not in ["error", "discarded"]:
                     current_phase = "completed"
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
@@ -591,6 +649,26 @@ def handle_stop_recording() -> dict[str, Any]:
     }
 
 
+def handle_discard_recording() -> dict[str, Any]:
+    """Handle discard recording request - stops and deletes dataset"""
+    global current_phase, phase_start_time
+
+    if not recording_active or recording_events is None:
+        return {"success": False, "message": "No recording session is active"}
+
+    recording_events["stop_recording"] = True
+    recording_events["exit_early"] = True
+    recording_events["discard_recording"] = True
+    current_phase = "stopping"
+    phase_start_time = None
+    logger.info("Discard recording triggered from web interface")
+    return {
+        "success": True,
+        "message": "Recording discard requested successfully",
+        "session_ending": True,
+    }
+
+
 def handle_exit_early() -> dict[str, Any]:
     """Handle exit early request - replaces right arrow key"""
     if not recording_active or recording_events is None:
@@ -625,8 +703,8 @@ def handle_rerecord_episode() -> dict[str, Any]:
 
 def handle_recording_status() -> dict[str, Any]:
     """Handle recording status request"""
-    # If recording is not active and phase is completed or error, indicate session has ended
-    session_ended = not recording_active and current_phase in ["completed", "error"]
+    # If recording is not active and phase is completed, error, or discarded, indicate session has ended
+    session_ended = not recording_active and current_phase in ["completed", "error", "discarded"]
 
     # Log when session has ended to help debug frontend polling
     if session_ended:
@@ -635,6 +713,8 @@ def handle_recording_status() -> dict[str, Any]:
                 "📡 RECORDING STATUS REQUEST: Session failed with error - frontend should stop polling"
             )
             print("📡 STATUS CHANGE: Frontend is still polling after session error - should stop now")
+        elif current_phase == "discarded":
+            logger.info("📡 RECORDING STATUS REQUEST: Session was discarded - frontend should stop polling")
         else:
             logger.info("📡 RECORDING STATUS REQUEST: Session has ended - frontend should stop polling")
             print("📡 STATUS CHANGE: Frontend is still polling after session end - should stop now")
@@ -655,11 +735,18 @@ def handle_recording_status() -> dict[str, Any]:
         "message": "Recording session failed with error - check logs"
         if current_phase == "error"
         else (
-            "Recording session has ended - stop polling"
-            if session_ended
-            else "Recording status retrieved successfully"
+            "Recording session discarded"
+            if current_phase == "discarded"
+            else (
+                "Recording session has ended - stop polling"
+                if session_ended
+                else "Recording status retrieved successfully"
+            )
         ),
     }
+
+    if recording_active and recording_events:
+        status["events_state"] = dict(recording_events)
 
     # Always echo the stamped dataset id whenever a config exists, so the frontend
     # can read the actual on-disk repo_id (post stamp) for upload navigation.
@@ -748,6 +835,7 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
             "total_frames": dataset.num_frames,
             "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
             "codebase_version": getattr(dataset.meta, "codebase_version", "v3.0"),
+            "arm_mode": _infer_arm_mode_from_features(dataset.features),
         }
     except Exception as e:
         if local_info is not None:
@@ -1031,31 +1119,160 @@ def custom_record_loop(
     no_action_count = 0
     timestamp = 0
     start_episode_t = time.perf_counter()
+    def _cameras_frozen() -> bool:
+        return bool(getattr(robot, "_camera_frozen", None)) and any(robot._camera_frozen.values())
+
+    events["_is_homing"] = False
+    
+    # Auto-unlock arms precisely when the recording loop starts (unless manually locked by user)
+    # We ONLY do this during the recording phase (dataset is not None), NOT the resetting phase.
+    if dataset is not None:
+        try:
+            import subprocess
+            import os
+            import json
+            script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+            if not events.get("persistent_left_lock", False):
+                subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "toggle_left_home", "value": False})])
+            if not events.get("persistent_right_lock", False):
+                subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "toggle_right_home", "value": False})])
+        except Exception as e:
+            logger.error(f"Failed to publish auto-unlock commands: {e}")
+
     while timestamp < control_time_s:
+        global recording_active
+        if not recording_active:
+            break
+            
         # Wait if recording is paused
         while events.get("pause_recording", False) and not events.get("exit_early", False):
             precise_sleep(0.1)
             # Update start_episode_t so timestamp doesn't advance while paused
             start_episode_t += 0.1
-            import lelab.record
-            if lelab.record.phase_start_time is not None:
-                lelab.record.phase_start_time += 0.1
-            
+            global phase_start_time
+            if phase_start_time is not None:
+                phase_start_time += 0.1
+
+            # Auto-resume once the camera freeze that triggered this pause has
+            # cleared (the auto-recovery watchdog reconnects stalled cameras in
+            # the background). We only auto-resume freeze-induced pauses — a
+            # pause the user requested manually is left untouched.
+            if events.get("_freeze_paused", False) and not _cameras_frozen():
+                logger.info("Camera feed recovered — auto-resuming recording.")
+                print("\n✅ STATUS CHANGE: Camera recovered. Auto-resuming recording.")
+                events["pause_recording"] = False
+                events["_freeze_paused"] = False
+
         start_loop_t = time.perf_counter()
 
-        if events["exit_early"]:
+        if events.get("exit_early") and events.get("_is_homing", False):
+            # Double tap: Force exit immediately
             events["exit_early"] = False
             break
 
+        if (events.get("exit_early") or (control_time_s - timestamp <= 0.2)) and not events.get("_is_homing", False):
+            if dataset is not None:
+                events["_is_homing"] = True
+                events["_homing_start_time"] = timestamp
+                
+                if events.get("exit_early"):
+                    events["exit_early"] = False
+                    logger.info("Early exit triggered! Sending arms home and recording until target reached...")
+                    print("\n🛑 End episode pressed. Sending arms home. Continuing recording...")
+                    print("   (Press Space again to forcefully exit immediately)")
+                else:
+                    logger.info("Natural episode end approaching. Sending arms home and recording until target reached...")
+                
+                # Send home commands via UI command publisher
+                try:
+                    import subprocess
+                    import os
+                    import json
+                    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+                    
+                    target_state = events.get("target_home_state")
+                    if target_state is not None:
+                        if len(target_state) == 16:
+                            set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[8:15], "right_gripper": target_state[15]}
+                        elif len(target_state) == 8:
+                            # Send to both for single arm setups so it catches whichever is active
+                            set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7]}
+                        else:
+                            set_home = None
+                            
+                        if set_home:
+                            subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
+
+                    cmd1 = json.dumps({"action": "toggle_left_home", "value": True})
+                    cmd2 = json.dumps({"action": "toggle_right_home", "value": True})
+                    subprocess.Popen(["/usr/bin/python3", script_path, cmd1])
+                    subprocess.Popen(["/usr/bin/python3", script_path, cmd2])
+                except Exception as e:
+                    logger.error(f"Failed to publish homing command: {e}")
+                    
+                # Extend loop indefinitely to wait for arms to reach home
+                control_time_s = float('inf')
+            else:
+                # If we're in the resetting phase, just break when time is up or exit_early is pressed
+                events["exit_early"] = False
+                break
+
         # Get robot observation
         obs = robot.get_observation()
+        
+        # Always update current_robot_state so UI can display it continuously
+        current_state = obs.get("observation.state")
+        if current_state is None and hasattr(robot.config, "joint_names"):
+            current_state = [obs.get(f"{name}.pos", 0.0) for name in robot.config.joint_names]
+            
+        if current_state is not None:
+            import torch
+            if isinstance(current_state, torch.Tensor):
+                current_state = current_state.tolist()
+            elif hasattr(current_state, "tolist"):
+                current_state = current_state.tolist()
+            events["current_robot_state"] = current_state
+        
+        # Check if homing is complete
+        if events.get("_is_homing", False):
+            target_state = events.get("target_home_state")
+            if current_state is not None:
+                
+                if target_state is not None:
+                    # Check if all joints are within tolerance
+                    tolerance = 0.05  # radians (balanced to allow for slight physical steady-state error)
+                    is_home = True
+                    for c, t in zip(current_state, target_state):
+                        if abs(c - t) > tolerance:
+                            is_home = False
+                            break
+                    if is_home:
+                        logger.info("Arms reached home! Ending episode.")
+                        print("\n✅ Arms reached home. Episode complete.")
+                        break
+                    # Wait at most 4 seconds for safety to avoid hanging
+                    if timestamp - events.get("_homing_start_time", timestamp) > 4.0:
+                        logger.warning("Homing timeout reached! Ending episode anyway.")
+                        print("\n⚠️ Homing timeout reached! Ending episode.")
+                        break
+                else:
+                    # If we don't have a target state, we can't wait for it! Just wait 2 seconds.
+                    if timestamp - events.get("_homing_start_time", timestamp) > 2.0:
+                        break
 
-        # Auto-pause if any camera is frozen
-        if hasattr(robot, "_camera_frozen") and any(robot._camera_frozen.values()):
+        # Auto-pause if any camera is frozen, and DO NOT record this tick — the
+        # frozen camera reuses its last frame, which would pair a stale image
+        # with a fresh action and corrupt the dataset. Skipping the write here
+        # (in addition to the pause) closes the single-tick window before the
+        # pause takes effect on the next iteration.
+        if _cameras_frozen():
             if not events.get("pause_recording", False):
                 logger.warning("Camera frozen! Auto-pausing recording to prevent corrupted data.")
-                print("\n⚠️ STATUS CHANGE: Auto-paused due to camera freeze. Please check the UI and reconnect cameras.")
+                print("\n⚠️ STATUS CHANGE: Auto-paused due to camera freeze. Auto-recovery in progress...")
                 events["pause_recording"] = True
+                events["_freeze_paused"] = True
+            # Skip the rest of this iteration so no stale frame is written.
+            continue
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
         obs_processed = robot_observation_processor(obs)
@@ -1097,10 +1314,34 @@ def custom_record_loop(
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
-        _sent_action = robot.send_action(robot_action_to_send)
+        if not events.get("_is_homing", False):
+            _sent_action = robot.send_action(robot_action_to_send)
+        else:
+            # During homing, the ROS node takes control of the robot.
+            # We don't send teleop actions to avoid fighting the ROS homing controller.
+            pass
 
         # Write to dataset
         if dataset is not None:
+            if events.get("_captured_home_state") is None:
+                # Capture the raw state as the true home state!
+                try:
+                    state = obs.get("observation.state")
+                    if state is None and hasattr(robot.config, "joint_names"):
+                        state = [obs.get(f"{name}.pos", 0.0) for name in robot.config.joint_names]
+                    if state is not None:
+                        import torch
+                        if isinstance(state, torch.Tensor):
+                            state = state.tolist()
+                        elif hasattr(state, "tolist"):
+                            state = state.tolist()
+                        events["_captured_home_state"] = state
+                        logger.info(f"📍 Captured TRUE live robot home state: {state}")
+                        print(f"\n📍 Captured TRUE live robot home state: {state}\n")
+                except Exception as e:
+                    logger.warning(f"Failed to capture live robot state: {e}")
+                    events["_captured_home_state"] = []
+
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
@@ -1131,7 +1372,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
         sanity_check_dataset_name,
         sanity_check_dataset_robot_compatibility,
     )
-    from lerobot.datasets import LeRobotDataset
+    from lerobot.datasets import LeRobotDataset, VideoEncodingManager
     from lerobot.processor import make_default_processors
     from lerobot.robots import make_robot_from_config
     # Using custom_record_loop instead of imported record_loop
@@ -1291,83 +1532,69 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
     else:
         logger.warning("Teleop bus or calibration not available - calibration may not be applied")
 
+    # Save calibration to dataset folder when creating a new dataset
+    # Save calibration to dataset folder when creating a new dataset
+    if not cfg.resume:
+        try:
+            import yaml
+            from pathlib import Path
+            calib_path = Path(dataset.root) / "calibration.yaml"
+            workspace_yaml = Path(__file__).resolve().parent.parent.parent / "gripper_home.yaml"
+            
+            calib_data = {}
+            if workspace_yaml.exists():
+                with open(workspace_yaml, "r") as f:
+                    calib_data = yaml.safe_load(f) or {}
+            
+            if not calib_path.exists():
+                with open(calib_path, "w") as f:
+                    yaml.dump(calib_data, f)
+                logger.info(f"Saved initial calibration.yaml to dataset (without live home state yet): {calib_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save calibration.yaml to dataset: {e}")
+            
+    # Read target_home_state so we can use it for dynamic homing
+    target_home_state = None
+    try:
+        import yaml
+        calib_path = dataset.root / "calibration.yaml"
+        if calib_path.exists():
+            with open(calib_path, "r") as f:
+                calib_data = yaml.safe_load(f)
+                if calib_data and "live_robot_home_state" in calib_data:
+                    target_home_state = calib_data["live_robot_home_state"]
+    except Exception as e:
+        logger.warning(f"Failed to load target home state from calibration.yaml: {e}")
+    web_events["target_home_state"] = target_home_state
+
     # Start with episode 1 - but track it properly
     current_episode = 1
     saved_episodes = 0  # Track how many episodes we've actually saved
 
     try:
-        while saved_episodes < cfg.dataset.num_episodes:
-            # RECORDING PHASE - with dataset (matches original record.py exactly)
-            current_phase = "recording"
-            phase_start_time = time.time()
-            logger.info(f"Starting recording phase for episode {current_episode}")
-            logger.info(f"Events state at start of recording phase: {web_events}")
-            print(
-                f"🎬 STATUS CHANGE: Starting recording phase for episode {current_episode}/{cfg.dataset.num_episodes}"
-            )
-
-            log_say(f"Recording episode {current_episode}", cfg.play_sounds)
-
-            # Add a tracking flag that won't be reset by record_loop
-            web_events["_exit_early_triggered"] = False
-            logger.info(f"Recording phase - calling record_loop with events: {web_events}")
-
-            custom_record_loop(
-                robot=robot,
-                events=web_events,
-                fps=cfg.dataset.fps,
-                teleop_action_processor=teleop_action_processor,
-                robot_action_processor=robot_action_processor,
-                robot_observation_processor=robot_observation_processor,
-                teleop=teleop,
-                dataset=dataset,
-                control_time_s=cfg.dataset.episode_time_s,
-                single_task=web_events.get("current_task", cfg.dataset.single_task),
-                display_data=cfg.display_data,
-            )
-
-            logger.info(f"Recording phase completed - events state: {web_events}")
-
-            # Check if exit_early was triggered (use our tracking flag)
-            recording_interrupted_by_exit_early = web_events.get("_exit_early_triggered", False)
-            if recording_interrupted_by_exit_early:
-                logger.info("🟡 RECORDING PHASE INTERRUPTED BY EXIT_EARLY - proceeding to save episode")
+        with VideoEncodingManager(dataset):
+            global recording_active
+            while saved_episodes < cfg.dataset.num_episodes and recording_active:
+                # RECORDING PHASE - with dataset (matches original record.py exactly)
+                current_phase = "recording"
+                phase_start_time = time.time()
+                logger.info(f"Starting recording phase for episode {current_episode}")
+                logger.info(f"Events state at start of recording phase: {web_events}")
                 print(
-                    f"🟡 STATUS CHANGE: Recording phase interrupted by user - episode {current_episode} data collected"
+                    f"🎬 STATUS CHANGE: Starting recording phase for episode {current_episode}/{cfg.dataset.num_episodes}"
                 )
-                # Reset our tracking flag
+
+                log_say(f"Recording episode {current_episode}", cfg.play_sounds)
+
+                # Start with a get-ready phase for the first episode
+                if current_episode == 1 and not web_events.get("_initial_get_ready_done"):
+                    web_events["rerecord_episode"] = True
+                    web_events["exit_early"] = True
+                    web_events["_initial_get_ready_done"] = True
+
+                # Add a tracking flag that won't be reset by record_loop
                 web_events["_exit_early_triggered"] = False
-            else:
-                # Recording completed due to timeout - trigger re-record behavior
-                logger.info("⏰ RECORDING PHASE COMPLETED DUE TO TIMEOUT - triggering re-record")
-                print(
-                    f"⏰ STATUS CHANGE: Recording timeout reached for episode {current_episode} - re-recording"
-                )
-                web_events["rerecord_episode"] = True
-
-            # Handle rerecord logic first (before saving)
-            if web_events["rerecord_episode"]:
-                log_say("Re-record episode", cfg.play_sounds)
-                print(
-                    f"🔄 STATUS CHANGE: Re-recording episode {current_episode} (episode number stays the same)"
-                )
-                web_events["rerecord_episode"] = False
-                web_events["exit_early"] = False
-                dataset.clear_episode_buffer()
-
-                # Go through reset phase before re-recording (don't increment episode counters)
-                # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
-                phase_start_time = time.time()
-                logger.info(f"Starting reset phase for re-record of episode {current_episode}")
-                logger.info(f"Events state at start of reset phase: {web_events}")
-                print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
-
-                log_say("Reset the environment", cfg.play_sounds)
-
-                # Reset exit_early flag at the start of each phase
-                web_events["exit_early"] = False
-                logger.info(f"Reset phase - calling record_loop with events: {web_events}")
+                logger.info(f"Recording phase - calling record_loop with events: {web_events}")
 
                 custom_record_loop(
                     robot=robot,
@@ -1377,99 +1604,176 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     robot_action_processor=robot_action_processor,
                     robot_observation_processor=robot_observation_processor,
                     teleop=teleop,
-                    # NOTE: NO dataset parameter here - matches LeRobot CLI exactly
-                    # This means NO recording happens during reset phase
-                    control_time_s=cfg.dataset.reset_time_s,
-                    single_task=cfg.dataset.single_task,
+                    dataset=dataset,
+                    control_time_s=cfg.dataset.episode_time_s,
+                    single_task=web_events.get("current_task", cfg.dataset.single_task),
                     display_data=cfg.display_data,
                 )
 
-                logger.info(f"Reset phase completed - events state: {web_events}")
+                logger.info(f"Recording phase completed - events state: {web_events}")
 
-                # Check if reset was interrupted by exit_early
-                if web_events["exit_early"]:
-                    logger.info("🟡 RESET PHASE INTERRUPTED BY EXIT_EARLY during re-record")
-                    print("🟡 STATUS CHANGE: Reset phase interrupted by user during re-record")
-                    web_events["exit_early"] = False
+                # Check if we captured a new home state during this episode
+                if web_events.get("_captured_home_state") is not None and not web_events.get("_calibration_saved"):
+                    try:
+                        import yaml
+                        from pathlib import Path
+                        calib_path = Path(dataset.root) / "calibration.yaml"
+                        calib_data = {}
+                        workspace_yaml = Path(__file__).resolve().parent.parent.parent / "gripper_home.yaml"
+                        if workspace_yaml.exists():
+                            with open(workspace_yaml, "r") as f:
+                                calib_data = yaml.safe_load(f) or {}
+                        calib_data["live_robot_home_state"] = web_events["_captured_home_state"]
+                        with open(calib_path, "w") as f:
+                            yaml.dump(calib_data, f)
+                        logger.info(f"Saved true calibration.yaml to dataset: {calib_path}")
+                        web_events["_calibration_saved"] = True
+                        web_events["target_home_state"] = web_events["_captured_home_state"]
+                    except Exception as e:
+                        logger.warning(f"Failed to save true calibration.yaml: {e}")
 
-                # Check if stop recording was requested during re-record reset phase
-                if web_events["stop_recording"]:
-                    logger.info("🛑 STOP RECORDING requested during re-record reset phase - ending session")
+                # Check if exit_early was triggered (use our tracking flag)
+                recording_interrupted_by_exit_early = web_events.get("_exit_early_triggered", False)
+                if recording_interrupted_by_exit_early:
+                    logger.info("🟡 RECORDING PHASE INTERRUPTED BY EXIT_EARLY - proceeding to save episode")
                     print(
-                        "🛑 STATUS CHANGE: Stop recording requested during re-record reset - ending session"
+                        f"🟡 STATUS CHANGE: Recording phase interrupted by user - episode {current_episode} data collected"
                     )
-                    break
+                    # Reset our tracking flag
+                    web_events["_exit_early_triggered"] = False
+                else:
+                    # Recording completed due to timeout - trigger re-record behavior
+                    logger.info("⏰ RECORDING PHASE COMPLETED DUE TO TIMEOUT - triggering re-record")
+                    print(
+                        f"⏰ STATUS CHANGE: Recording timeout reached for episode {current_episode} - re-recording"
+                    )
+                    web_events["rerecord_episode"] = True
 
-                # Don't increment current_episode or saved_episodes - we're re-recording the same episode
-                continue
-
-            # Save episode immediately after recording phase (matches expected flow)
-            logger.info(f"💾 Saving episode {current_episode}...")
-            print(f"💾 STATUS CHANGE: Saving episode {current_episode}")
-            
-            dataset.save_episode()
-            
-            episode_task = web_events.get("current_task", cfg.dataset.single_task)
-            logger.info(f"✅ Episode {current_episode} saved successfully with task: {episode_task}")
-            print(f"✅ STATUS CHANGE: Episode {current_episode} saved successfully")
-
-            # Increment episode counters after successful save
-            saved_episodes += 1
-            current_episode += 1
-
-            # Check if we should stop recording
-            if web_events["stop_recording"]:
-                print("🛑 STATUS CHANGE: Recording manually stopped by user")
-                break
-
-            # Check if we've completed all episodes
-            if saved_episodes >= cfg.dataset.num_episodes:
-                break
-
-            # Execute reset phase to prepare for next episode
-            # Skip reset for the last episode that was just saved
-            if saved_episodes < cfg.dataset.num_episodes:
-                # RESET PHASE - without dataset (matches original record.py exactly)
-                current_phase = "resetting"
-                phase_start_time = time.time()
-                logger.info(f"Starting reset phase for next episode {current_episode}")
-                logger.info(f"Events state at start of reset phase: {web_events}")
-                print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
-
-                log_say("Reset the environment", cfg.play_sounds)
-
-                # Reset exit_early flag at the start of each phase
-                web_events["exit_early"] = False
-                logger.info(f"Reset phase - calling record_loop with events: {web_events}")
-
-                custom_record_loop(
-                    robot=robot,
-                    events=web_events,
-                    fps=cfg.dataset.fps,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    # NOTE: NO dataset parameter here - matches LeRobot CLI exactly
-                    # This means NO recording happens during reset phase
-                    control_time_s=cfg.dataset.reset_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
-                )
-
-                logger.info(f"Reset phase completed - events state: {web_events}")
-
-                # Check if reset was interrupted by exit_early
-                if web_events["exit_early"]:
-                    logger.info("🟡 RESET PHASE INTERRUPTED BY EXIT_EARLY - proceeding to next episode")
-                    print("🟡 STATUS CHANGE: Reset phase interrupted by user - proceeding to next episode")
+                # Handle rerecord logic first (before saving)
+                if web_events["rerecord_episode"]:
+                    log_say("Re-record episode", cfg.play_sounds)
+                    print(
+                        f"🔄 STATUS CHANGE: Re-recording episode {current_episode} (episode number stays the same)"
+                    )
+                    web_events["rerecord_episode"] = False
                     web_events["exit_early"] = False
+                    dataset.clear_episode_buffer()
 
-                # Check if stop recording was requested during reset phase
+                    # Go through reset phase before re-recording (don't increment episode counters)
+                    # RESET PHASE - without dataset (matches original record.py exactly)
+                    current_phase = "resetting"
+                    phase_start_time = time.time()
+                    logger.info(f"Starting reset phase for re-record of episode {current_episode}")
+                    logger.info(f"Events state at start of reset phase: {web_events}")
+                    print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
+
+                    log_say("Reset the environment", cfg.play_sounds)
+
+                    # Reset exit_early flag at the start of each phase
+                    web_events["exit_early"] = False
+                    logger.info(f"Reset phase - calling record_loop with events: {web_events}")
+
+                    custom_record_loop(
+                        robot=robot,
+                        events=web_events,
+                        fps=cfg.dataset.fps,
+                        teleop_action_processor=teleop_action_processor,
+                        robot_action_processor=robot_action_processor,
+                        robot_observation_processor=robot_observation_processor,
+                        teleop=teleop,
+                        # NOTE: NO dataset parameter here - matches LeRobot CLI exactly
+                        # This means NO recording happens during reset phase
+                        control_time_s=cfg.dataset.reset_time_s,
+                        single_task=cfg.dataset.single_task,
+                        display_data=cfg.display_data,
+                    )
+
+                    logger.info(f"Reset phase completed - events state: {web_events}")
+
+                    # Check if reset was interrupted by exit_early
+                    if web_events["exit_early"]:
+                        logger.info("🟡 RESET PHASE INTERRUPTED BY EXIT_EARLY during re-record")
+                        print("🟡 STATUS CHANGE: Reset phase interrupted by user during re-record")
+                        web_events["exit_early"] = False
+
+                    # Check if stop recording was requested during re-record reset phase
+                    if web_events["stop_recording"]:
+                        logger.info("🛑 STOP RECORDING requested during re-record reset phase - ending session")
+                        print(
+                            "🛑 STATUS CHANGE: Stop recording requested during re-record reset - ending session"
+                        )
+                        break
+
+                    # Don't increment current_episode or saved_episodes - we're re-recording the same episode
+                    continue
+
+                # Save episode immediately after recording phase (matches expected flow)
+                logger.info(f"💾 Saving episode {current_episode}...")
+                print(f"💾 STATUS CHANGE: Saving episode {current_episode}")
+            
+                dataset.save_episode()
+            
+                episode_task = web_events.get("current_task", cfg.dataset.single_task)
+                logger.info(f"✅ Episode {current_episode} saved successfully with task: {episode_task}")
+                print(f"✅ STATUS CHANGE: Episode {current_episode} saved successfully")
+
+                # Increment episode counters after successful save
+                saved_episodes += 1
+                current_episode += 1
+
+                # Check if we should stop recording
                 if web_events["stop_recording"]:
-                    logger.info("🛑 STOP RECORDING requested during reset phase - ending session")
-                    print("🛑 STATUS CHANGE: Stop recording requested during reset - ending session")
+                    print("🛑 STATUS CHANGE: Recording manually stopped by user")
                     break
+
+                # Check if we've completed all episodes
+                if saved_episodes >= cfg.dataset.num_episodes:
+                    break
+
+                # Execute reset phase to prepare for next episode
+                # Skip reset for the last episode that was just saved
+                if saved_episodes < cfg.dataset.num_episodes:
+                    # RESET PHASE - without dataset (matches original record.py exactly)
+                    current_phase = "resetting"
+                    phase_start_time = time.time()
+                    logger.info(f"Starting reset phase for next episode {current_episode}")
+                    logger.info(f"Events state at start of reset phase: {web_events}")
+                    print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
+
+                    log_say("Reset the environment", cfg.play_sounds)
+
+                    # Reset exit_early flag at the start of each phase
+                    web_events["exit_early"] = False
+                    logger.info(f"Reset phase - calling record_loop with events: {web_events}")
+
+                    custom_record_loop(
+                        robot=robot,
+                        events=web_events,
+                        fps=cfg.dataset.fps,
+                        teleop_action_processor=teleop_action_processor,
+                        robot_action_processor=robot_action_processor,
+                        robot_observation_processor=robot_observation_processor,
+                        teleop=teleop,
+                        # NOTE: NO dataset parameter here - matches LeRobot CLI exactly
+                        # This means NO recording happens during reset phase
+                        control_time_s=cfg.dataset.reset_time_s,
+                        single_task=cfg.dataset.single_task,
+                        display_data=cfg.display_data,
+                    )
+
+                    logger.info(f"Reset phase completed - events state: {web_events}")
+
+                    # Check if reset was interrupted by exit_early
+                    if web_events["exit_early"]:
+                        logger.info("🟡 RESET PHASE INTERRUPTED BY EXIT_EARLY - proceeding to next episode")
+                        print("🟡 STATUS CHANGE: Reset phase interrupted by user - proceeding to next episode")
+                        web_events["exit_early"] = False
+
+                    # Check if stop recording was requested during reset phase
+                    if web_events["stop_recording"]:
+                        logger.info("🛑 STOP RECORDING requested during reset phase - ending session")
+                        print("🛑 STATUS CHANGE: Stop recording requested during reset - ending session")
+                        break
 
         # Recording completed
         current_phase = "completed"

@@ -150,6 +150,12 @@ class ExoskeletonBridgeNode(Node):
             elif action == 'toggle_right_home':
                 self.right_fixed_home = bool(data.get('value', False))
                 self.get_logger().info(f"UI Command: Right arm home fixed = {self.right_fixed_home}")
+            elif action == 'set_home_target':
+                self.custom_home_left = data.get('left_arm')
+                self.custom_home_right = data.get('right_arm')
+                self.custom_gripper_left = data.get('left_gripper')
+                self.custom_gripper_right = data.get('right_gripper')
+                self.get_logger().info("UI Command: Custom home target updated")
         except Exception as e:
             self.get_logger().error(f"Error parsing ui_command: {e}")
 
@@ -348,10 +354,17 @@ class ExoskeletonBridgeNode(Node):
 
             # Calculate raw target based on lock state
             if is_locked:
-                target_arm = np.array(self.boot_homing_arm_target, dtype=float)
-                target_gripper = float(
-                    np.clip(self.boot_homing_gripper_target, self.gripper_min_position_m, self.gripper_max_position_m)
-                )
+                if side == 'left' and getattr(self, 'custom_home_left', None) is not None:
+                    target_arm = np.array(self.custom_home_left, dtype=float)
+                    target_gripper = float(self.custom_gripper_left)
+                elif side == 'right' and getattr(self, 'custom_home_right', None) is not None:
+                    target_arm = np.array(self.custom_home_right, dtype=float)
+                    target_gripper = float(self.custom_gripper_right)
+                else:
+                    target_arm = np.array(self.boot_homing_arm_target, dtype=float)
+                    target_gripper = float(
+                        np.clip(self.boot_homing_gripper_target, self.gripper_min_position_m, self.gripper_max_position_m)
+                    )
             else:
                 target_arm = self.input_arm[side] if self.have_input[side] else self.cmd_arm[side]
                 target_gripper = self.input_gripper[side] if self.have_input[side] else self.cmd_gripper[side]

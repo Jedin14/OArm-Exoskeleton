@@ -3,9 +3,10 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 
 interface JointGraphProps {
   jointPositions?: Record<string, number>;
+  armMode?: string;
 }
 
-export const JointGraph: React.FC<JointGraphProps> = ({ jointPositions }) => {
+export const JointGraph: React.FC<JointGraphProps> = ({ jointPositions, armMode = "both" }) => {
   const [history, setHistory] = useState<any[]>([]);
 
   useEffect(() => {
@@ -26,8 +27,15 @@ export const JointGraph: React.FC<JointGraphProps> = ({ jointPositions }) => {
 
   const colors = ['#ff6b35', '#ffdd44', '#4ade80', '#60a5fa', '#a78bfa', '#f472b6', '#fb923c'];
 
+  // In single-arm recording modes the other arm has no data — hide its panel
+  // so we don't show an empty chart.
+  const showLeft = armMode !== "right";
+  const showRight = armMode !== "left";
+  const gridCols = showLeft && showRight ? "xl:grid-cols-2" : "grid-cols-1";
+
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 h-full">
+    <div className={`grid grid-cols-1 ${gridCols} gap-4 h-full`}>
+      {showLeft && (
       <div className="border border-gray-800 rounded-lg p-4 bg-gray-900 flex flex-col min-h-[250px]">
         <h3 className="text-sm text-white font-medium mb-2">Left Arm Joints</h3>
         <div className="flex-1">
@@ -59,7 +67,9 @@ export const JointGraph: React.FC<JointGraphProps> = ({ jointPositions }) => {
           </ResponsiveContainer>
         </div>
       </div>
+      )}
 
+      {showRight && (
       <div className="border border-gray-800 rounded-lg p-4 bg-gray-900 flex flex-col min-h-[250px]">
         <h3 className="text-sm text-white font-medium mb-2">Right Arm Joints</h3>
         <div className="flex-1">
@@ -91,6 +101,7 @@ export const JointGraph: React.FC<JointGraphProps> = ({ jointPositions }) => {
           </ResponsiveContainer>
         </div>
       </div>
+      )}
     </div>
   );
 };

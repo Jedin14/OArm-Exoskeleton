@@ -25,6 +25,8 @@ import {
   Pause,
   Volume2,
   VolumeX,
+  Trash2,
+  Activity,
 } from "lucide-react";
 import {
   getMuted,
@@ -64,6 +66,7 @@ interface RecordingConfig {
   push_to_hub: boolean;
   resume: boolean;
   streaming_encoding: boolean;
+  arm_mode?: string;
   cameras?: Record<string, any>;
 }
 
@@ -108,6 +111,7 @@ const Recording = () => {
 
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [muted, setMutedState] = useState<boolean>(() => getMuted());
   const [leftArmFixed, setLeftArmFixed] = useState(false);
   const [rightArmFixed, setRightArmFixed] = useState(false);
@@ -169,13 +173,21 @@ const Recording = () => {
     }
   };
 
+  const persistentLeftLockRef = useRef(false);
+  const persistentRightLockRef = useRef(false);
+
   const handleToggleLeftArm = async () => {
     const nextState = !leftArmFixed;
     setLeftArmFixed(nextState);
+    persistentLeftLockRef.current = nextState;
     try {
       await fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, {
         method: "POST",
         body: JSON.stringify({ fixed: nextState }),
+      });
+      await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
+        method: "POST",
+        body: JSON.stringify({ arm: "left", locked: nextState }),
       });
     } catch (e) {
       console.error(e);
@@ -185,10 +197,15 @@ const Recording = () => {
   const handleToggleRightArm = async () => {
     const nextState = !rightArmFixed;
     setRightArmFixed(nextState);
+    persistentRightLockRef.current = nextState;
     try {
       await fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, {
         method: "POST",
         body: JSON.stringify({ fixed: nextState }),
+      });
+      await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
+        method: "POST",
+        body: JSON.stringify({ arm: "right", locked: nextState }),
       });
     } catch (e) {
       console.error(e);
@@ -199,14 +216,24 @@ const Recording = () => {
     setIsTriggeringHome(true);
     setLeftArmFixed(true);
     setRightArmFixed(true);
+    persistentLeftLockRef.current = true;
+    persistentRightLockRef.current = true;
     try {
       await fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, {
         method: "POST",
         body: JSON.stringify({ fixed: true })
       });
+      await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
+        method: "POST",
+        body: JSON.stringify({ arm: "left", locked: true })
+      });
       await fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, {
         method: "POST",
         body: JSON.stringify({ fixed: true })
+      });
+      await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
+        method: "POST",
+        body: JSON.stringify({ arm: "right", locked: true })
       });
       toast({ title: "Arms Locked to Home", description: "Both arms are securely locked to home. Click the unlock buttons to release them." });
     } catch (e) {
@@ -276,9 +303,19 @@ const Recording = () => {
 
         const real = status.current_phase as Phase;
         const prev = prevRealPhaseRef.current;
+        
         if (prev !== real) {
           if (real === "recording" && prev !== null) {
             playRecordingStartCue();
+            // Note: Auto-unlock is now handled synchronously in the backend
+            // to completely eliminate polling delay when recording starts.
+          } else if (prev === "recording" && real !== "recording") {
+            // Lock arms to home when recording phase ends
+            setLeftArmFixed(true);
+            setRightArmFixed(true);
+            fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+            fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+            if (real === "resetting") playResetStartCue();
           } else if (real === "resetting") {
             playResetStartCue();
           }
@@ -352,6 +389,7 @@ const Recording = () => {
 
       if (response.ok) {
         setRecordingSessionStarted(true);
+        handleTriggerHome();
         toast({
           title: "Recording Started",
           description: `Started recording ${recordingConfig.num_episodes} episodes`,
@@ -384,6 +422,14 @@ const Recording = () => {
       realPhase === "resetting" ? "recording" : null;
 
     if (!next) return;
+
+    if (realPhase === "recording") {
+      // Lock arms to home immediately when episode ends manually
+      setLeftArmFixed(true);
+      setRightArmFixed(true);
+      fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+      fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+    }
 
     setOptimisticPhase(next);
 
@@ -424,8 +470,28 @@ const Recording = () => {
     }
   }, [backendStatus, baseUrl, fetchWithHeaders, toast]);
 
-  const handleRerecordEpisode = useCallback(async () => {
+  const [showRerecordPrompt, setShowRerecordPrompt] = useState(false);
+
+  const requestRerecordEpisode = useCallback(async () => {
     if (!backendStatus?.available_controls.rerecord_episode) return;
+    
+    // Temporarily unlock arms so the user can safely guide them to home
+    setLeftArmFixed(false);
+    setRightArmFixed(false);
+    fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: false }) }).catch(console.error);
+    fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: false }) }).catch(console.error);
+    
+    setShowRerecordPrompt(true);
+  }, [backendStatus, baseUrl, fetchWithHeaders]);
+
+  const confirmRerecordEpisode = useCallback(async () => {
+    setShowRerecordPrompt(false);
+
+    // Lock arms back to exact zero before triggering backend re-record
+    setLeftArmFixed(true);
+    setRightArmFixed(true);
+    fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+    fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
 
     try {
       const response = await fetchWithHeaders(
@@ -440,7 +506,7 @@ const Recording = () => {
         setRerecordTick((t) => t + 1);
         toast({
           title: "Re-recording Episode",
-          description: `Episode ${backendStatus.current_episode} will be re-recorded.`,
+          description: `Episode ${backendStatus?.current_episode} will be re-recorded.`,
         });
       } else {
         toast({
@@ -461,6 +527,10 @@ const Recording = () => {
   const handleStopRecording = useCallback(async () => {
     if (!backendStatus?.available_controls.stop_recording) return;
     try {
+      // Home arms before stopping
+      fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+      fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+
       await fetchWithHeaders(`${baseUrl}/stop-recording`, {
         method: "POST",
       });
@@ -488,20 +558,54 @@ const Recording = () => {
     await handleStopRecording();
   }, [handleStopRecording]);
 
+  const handleDiscardRecording = useCallback(async () => {
+    if (!backendStatus?.available_controls.stop_recording) return;
+    try {
+      await fetchWithHeaders(`${baseUrl}/discard-recording`, {
+        method: "POST",
+      });
+
+      toast({
+        title: "Discarding recording",
+        description: "Deleting dataset files…",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to discard recording.",
+        variant: "destructive",
+      });
+    }
+  }, [backendStatus, baseUrl, fetchWithHeaders, toast]);
+
+  const requestDiscardRecording = useCallback(() => {
+    if (!backendStatus?.available_controls.stop_recording) return;
+    setShowDiscardConfirm(true);
+  }, [backendStatus]);
+
+  const confirmDiscardRecording = useCallback(async () => {
+    setShowDiscardConfirm(false);
+    await handleDiscardRecording();
+  }, [handleDiscardRecording]);
+
   const handlersRef = useRef({
     handleExitEarly,
-    handleRerecordEpisode,
+    requestRerecordEpisode,
     handleTogglePause,
     requestStopRecording,
     showStopConfirm,
+    requestDiscardRecording,
+    showDiscardConfirm,
   });
   useEffect(() => {
     handlersRef.current = {
       handleExitEarly,
-      handleRerecordEpisode,
+      requestRerecordEpisode,
       handleTogglePause,
       requestStopRecording,
       showStopConfirm,
+      requestDiscardRecording,
+      showDiscardConfirm,
     };
   });
 
@@ -520,12 +624,12 @@ const Recording = () => {
         handlersRef.current.handleExitEarly();
       } else if (e.key === "ArrowLeft" || e.key.toLowerCase() === "r") {
         e.preventDefault();
-        handlersRef.current.handleRerecordEpisode();
+        handlersRef.current.requestRerecordEpisode();
       } else if (e.key.toLowerCase() === "p") {
         e.preventDefault();
         handlersRef.current.handleTogglePause();
       } else if (e.key === "Escape") {
-        if (handlersRef.current.showStopConfirm) return;
+        if (handlersRef.current.showStopConfirm || handlersRef.current.showDiscardConfirm) return;
         handlersRef.current.requestStopRecording();
       }
     };
@@ -649,7 +753,7 @@ const Recording = () => {
                 className="bg-gray-900 border-gray-700 text-white"
               >
                 <DropdownMenuItem
-                  onClick={handleRerecordEpisode}
+                  onClick={requestRerecordEpisode}
                   disabled={!backendStatus.available_controls.rerecord_episode}
                   className="focus:bg-gray-800 focus:text-white"
                 >
@@ -675,6 +779,34 @@ const Recording = () => {
               </div>
             )}
           </div>
+
+            {backendStatus?.events_state?._is_homing && (
+              <div className="mt-4 mb-4 bg-orange-950/40 border border-orange-500/30 p-4 rounded-xl shadow-lg w-full max-w-lg text-left">
+                <div className="flex items-center gap-2 mb-2 text-orange-400 font-bold">
+                  <Activity className="w-5 h-5 animate-pulse" />
+                  Waiting for arms to reach home...
+                </div>
+                <div className="grid grid-cols-2 gap-4 text-xs font-mono mt-3">
+                  <div className="bg-black/50 p-3 rounded-lg border border-white/10">
+                    <span className="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">Target Zero</span>
+                    <div className="text-green-400 leading-tight">
+                      {backendStatus.events_state.target_home_state ? 
+                        backendStatus.events_state.target_home_state.map((v: number) => v.toFixed(3)).join(", ") 
+                        : "Unknown"}
+                    </div>
+                  </div>
+                  <div className="bg-black/50 p-3 rounded-lg border border-white/10">
+                    <span className="text-gray-400 block mb-1 uppercase tracking-wider text-[10px]">Live Position</span>
+                    <div className="text-orange-400 leading-tight">
+                      {backendStatus.events_state.current_robot_state ? 
+                        backendStatus.events_state.current_robot_state.map((v: number) => v.toFixed(3)).join(", ") 
+                        : "Waiting..."}
+                    </div>
+                  </div>
+                </div>
+                <p className="text-orange-300/60 text-[10px] mt-3 italic text-center">Episode will end automatically when live values match target zero.</p>
+              </div>
+            )}
 
           <div className="text-center mb-4">
             <div className={`text-7xl font-mono font-bold leading-none ${phaseColor.timer}`}>
@@ -800,7 +932,16 @@ const Recording = () => {
             </p>
           )}
 
-          <div className="flex justify-center mt-8">
+          <div className="flex flex-col sm:flex-row justify-center gap-4 mt-8">
+            <Button
+              variant="destructive"
+              onClick={requestDiscardRecording}
+              disabled={!backendStatus.available_controls.stop_recording}
+              className="w-full bg-red-950/40 text-red-400 hover:bg-red-900/60 hover:text-red-300 border border-red-900/50 font-semibold py-6 text-lg rounded-xl shadow transition-colors"
+            >
+              <Trash2 className="w-5 h-5 mr-3" />
+              Discard Recording
+            </Button>
             <Button
               variant="destructive"
               onClick={requestStopRecording}
@@ -815,13 +956,69 @@ const Recording = () => {
 
           <div className="lg:col-span-7 flex flex-col gap-8">
             <RecordingCameraPreview cameras={Object.keys(recordingConfig.cameras || {})} />
-            <div className="flex-1 min-h-[300px]">
-              <JointGraph jointPositions={backendStatus.joint_positions} />
+            <div className="flex-1 min-h-[300px] flex flex-col gap-4">
+              <JointGraph jointPositions={backendStatus.joint_positions} armMode={recordingConfig.arm_mode} />
+              
+              <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 flex flex-col min-h-0 relative shrink-0">
+                <h3 className="text-white text-sm font-semibold mb-4">Live Joint Values vs Target Home State</h3>
+                <div className="grid grid-cols-2 gap-6 text-xs font-mono">
+                    <div>
+                      <div className="text-slate-400 mb-3 font-semibold">Current State ({backendStatus?.events_state?.current_robot_state?.length || 0} joints)</div>
+                      {backendStatus?.events_state?.current_robot_state ? (
+                        <div className="grid grid-cols-4 gap-2">
+                          {backendStatus.events_state.current_robot_state.map((v: number, i: number) => (
+                            <div key={`cur-${i}`} className="bg-slate-800/80 text-blue-400 px-2 py-1 rounded text-center">
+                              {v.toFixed(4)}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-slate-500">Waiting for live observation...</div>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-slate-400 mb-3 font-semibold">Target Home State</div>
+                      {backendStatus?.events_state?.target_home_state ? (
+                        <div className="grid grid-cols-4 gap-2">
+                          {backendStatus.events_state.target_home_state.map((v: number, i: number) => (
+                            <div key={`tgt-${i}`} className="bg-slate-800/80 text-green-400 px-2 py-1 rounded text-center">
+                              {v.toFixed(4)}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-slate-500">Not loaded (No calibration.yaml found)</div>
+                      )}
+                    </div>
+                </div>
+              </div>
             </div>
 
           </div>
         </div>
       </div>
+
+      <AlertDialog open={showRerecordPrompt} onOpenChange={setShowRerecordPrompt}>
+        <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Re-record Episode</AlertDialogTitle>
+            <AlertDialogDescription className="text-gray-400">
+              The arms have been temporarily unlocked. Please manually guide the arms to approximately their home position to avoid sudden jerks.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="bg-gray-800 border-gray-700 text-white hover:bg-gray-700">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmRerecordEpisode}
+              className="bg-orange-600 hover:bg-orange-700 text-white"
+            >
+              Lock Home & Re-record
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
         <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
@@ -840,6 +1037,28 @@ const Recording = () => {
               className="bg-red-500 hover:bg-red-600 text-white"
             >
               Stop
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showDiscardConfirm} onOpenChange={setShowDiscardConfirm}>
+        <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard recording?</AlertDialogTitle>
+            <AlertDialogDescription className="text-gray-400">
+              Are you sure you want to discard this entire session? All recorded episodes will be completely deleted and this cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="bg-gray-800 border-gray-700 text-white hover:bg-gray-700">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDiscardRecording}
+              className="bg-red-500 hover:bg-red-600 text-white"
+            >
+              Discard Dataset
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

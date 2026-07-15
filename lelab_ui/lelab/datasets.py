@@ -14,7 +14,7 @@
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import timezone, datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,7 @@ def _is_dataset_dir(path: Path) -> bool:
 def _dir_mtime_iso(path: Path) -> str | None:
     try:
         ts = path.stat().st_mtime
-        return datetime.fromtimestamp(ts, tz=UTC).isoformat()
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     except OSError:
         return None
 

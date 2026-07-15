@@ -58,6 +58,8 @@ interface RecordingModalProps {
   taskOptions: string[];
   onAddTaskOption: (task: string) => void;
   onDeleteTaskOption: (task: string) => void;
+  armMode: string;
+  setArmMode: (value: string) => void;
 }
 
 const RecordingModal: React.FC<RecordingModalProps> = ({
@@ -87,6 +89,8 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   taskOptions,
   onAddTaskOption,
   onDeleteTaskOption,
+  armMode,
+  setArmMode,
 }) => {
   const { auth } = useHfAuth();
 
@@ -285,6 +289,35 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                     className="bg-gray-800 border-gray-700 text-white"
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label
+                    htmlFor="armMode"
+                    className="text-sm font-medium text-gray-300"
+                  >
+                    Arms to Record
+                  </Label>
+                  <Select value={armMode} onValueChange={setArmMode} disabled={isResume}>
+                    <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-full disabled:opacity-60 disabled:cursor-not-allowed">
+                      <SelectValue placeholder="Select arms to record" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-gray-800 border-gray-700">
+                      <SelectItem value="both" className="text-white hover:bg-gray-700">
+                        Both Arms
+                      </SelectItem>
+                      <SelectItem value="left" className="text-white hover:bg-gray-700">
+                        Left Arm Only
+                      </SelectItem>
+                      <SelectItem value="right" className="text-white hover:bg-gray-700">
+                        Right Arm Only
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {isResume && (
+                    <p className="text-xs text-gray-500">
+                      Locked to match the existing dataset.
+                    </p>
+                  )}
+                </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label
@@ -325,8 +358,8 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                   <Label className="text-sm font-medium text-gray-300">
                     Dataset Format
                   </Label>
-                  <Select value={datasetVersion} onValueChange={setDatasetVersion}>
-                    <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-full">
+                  <Select value={datasetVersion} onValueChange={setDatasetVersion} disabled={isResume}>
+                    <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-full disabled:opacity-60 disabled:cursor-not-allowed">
                       <SelectValue placeholder="Select format" />
                     </SelectTrigger>
                     <SelectContent className="bg-gray-800 border-gray-700">
@@ -338,6 +371,11 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                       </SelectItem>
                     </SelectContent>
                   </Select>
+                  {isResume && (
+                    <p className="text-xs text-gray-500">
+                      Locked to match the existing dataset.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -348,6 +386,7 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                 onCamerasChange={setCameras}
                 releaseStreamsRef={releaseStreamsRef}
                 suggestedCameraNames={isResume ? previousCameraNames : []}
+                locked={isResume}
               />
             </div>
 

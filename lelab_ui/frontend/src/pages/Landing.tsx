@@ -48,6 +48,7 @@ const Landing = () => {
   const [resetTimeS, setResetTimeS] = useState(15);
   const [streamingEncoding, setStreamingEncoding] = useState(true);
   const [datasetVersion, setDatasetVersion] = useState("v3.0");
+  const [armMode, setArmMode] = useState("both");
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
 
   const releaseStreamsRef = useRef<(() => void) | null>(null);
@@ -77,6 +78,14 @@ const Landing = () => {
           const data = await response.json();
           if (response.ok && data.success && Array.isArray(data.camera_names)) {
             setResumeCameraNames(data.camera_names);
+            // These were fixed when the dataset was first created and must match
+            // exactly when appending episodes — seed them so the modal can lock them.
+            if (typeof data.arm_mode === "string" && data.arm_mode) {
+              setArmMode(data.arm_mode);
+            }
+            if (typeof data.codebase_version === "string" && data.codebase_version) {
+              setDatasetVersion(data.codebase_version);
+            }
             const existingTasks = Array.isArray(data.tasks)
               ? data.tasks.filter((t: unknown): t is string => typeof t === "string" && t.trim().length > 0)
               : [];
@@ -295,6 +304,7 @@ const Landing = () => {
       resume: isResume,
       streaming_encoding: streamingEncoding,
       dataset_version: datasetVersion,
+      arm_mode: armMode,
       cameras: cameraDict,
     };
 
@@ -404,13 +414,15 @@ const Landing = () => {
         setDatasetVersion={setDatasetVersion}
         cameras={cameras}
                 setCameras={setCameras}
-                taskOptions={taskOptions}
-                onAddTaskOption={handleAddTaskOption}
-                onDeleteTaskOption={handleDeleteTaskOption}
-                onStart={handleStartRecording}
-                releaseStreamsRef={releaseStreamsRef}
-                isResume={isResume}
+        taskOptions={taskOptions}
+        onAddTaskOption={handleAddTaskOption}
+        onDeleteTaskOption={handleDeleteTaskOption}
+        onStart={handleStartRecording}
+        releaseStreamsRef={releaseStreamsRef}
+        isResume={isResume}
         previousCameraNames={resumeCameraNames}
+        armMode={armMode}
+        setArmMode={setArmMode}
       />
     </div>
   );

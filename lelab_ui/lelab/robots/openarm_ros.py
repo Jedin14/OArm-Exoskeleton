@@ -5,6 +5,8 @@ import socket
 import threading
 import time
 from functools import cached_property
+import os
+import glob
 
 import numpy as np
 from lerobot.robots import RobotConfig, Robot
@@ -24,6 +26,33 @@ def check_if_not_connected(func):
     return wrapper
 
 
+def _get_usb_path_for_device(index_or_path):
+    if isinstance(index_or_path, int) or (isinstance(index_or_path, str) and str(index_or_path).isdigit()):
+        dev_path = f"/sys/class/video4linux/video{index_or_path}/device"
+    else:
+        name = os.path.basename(str(index_or_path))
+        dev_path = f"/sys/class/video4linux/{name}/device"
+        
+    try:
+        if os.path.exists(dev_path):
+            return os.path.realpath(dev_path)
+    except Exception:
+        pass
+    return None
+
+def _find_device_by_usb_path(target_usb_path):
+    if not target_usb_path:
+        return None
+    for sys_path in glob.glob("/sys/class/video4linux/video*/device"):
+        try:
+            if os.path.realpath(sys_path) == target_usb_path:
+                name = os.path.basename(os.path.dirname(sys_path))
+                return f"/dev/{name}"
+        except Exception:
+            continue
+    return None
+
+
 def check_if_already_connected(func):
     def wrapper(self, *args, **kwargs):
         if self.is_connected:
@@ -39,12 +68,14 @@ class OpenArmRosRobotConfig(RobotConfig):
     """Configuration for OpenArm running inside ROS 2 via UDP bridge."""
     type: str = "openarm_ros"
     cameras: dict = field(default_factory=dict)
+    arm_mode: str = "both"  # "left", "right", or "both"
     
-    # We define all 14 joints + 2 grippers
+    # We define joints depending on the arm mode
     @property
     def joint_names(self):
         names = []
-        for side in ("left", "right"):
+        sides = ("left", "right") if self.arm_mode == "both" else (self.arm_mode,)
+        for side in sides:
             for i in range(1, 8):
                 names.append(f"openarm_{side}_joint{i}")
             names.append(f"openarm_{side}_finger_joint1")
@@ -67,8 +98,8 @@ class OpenArmRosRobot(Robot):
         from lerobot.cameras.utils import make_cameras_from_configs
         self.cameras = make_cameras_from_configs(config.cameras)
         
-        # 14 joints + 2 grippers = 16
-        self.num_joints = 16 
+        # 8 per arm (7 joints + 1 gripper)
+        self.num_joints = len(self.config.joint_names) 
 
         self.udp_ip = "127.0.0.1"
         self.udp_port = 19092
@@ -86,6 +117,19 @@ class OpenArmRosRobot(Robot):
         self._latest_frames = {}
         self._frames_lock = threading.Lock()
         self._camera_frozen = {}
+        self._camera_usb_paths = {}
+
+        # Camera auto-recovery watchdog. Tracks the monotonic time each camera
+        # last produced a fresh frame so a background thread can transparently
+        # reconnect a stalled camera without any user interaction. The manual
+        # device-change endpoint is only a last resort for when auto-recovery
+        # can't find the device (e.g. physically re-plugged elsewhere).
+        self._camera_last_good = {}
+        self._camera_last_recover_attempt = {}
+        self._camera_stale_recover_s = 1.5   # freeze this long -> try recovery
+        self._camera_recover_backoff_s = 2.0  # min gap between attempts
+        self._watchdog_stop_event = threading.Event()
+        self._watchdog_thread = None
 
         for name in self.config.joint_names:
             self._latest_obs[f"{name}.pos"] = 0.0
@@ -101,10 +145,18 @@ class OpenArmRosRobot(Robot):
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
         features = {f"{name}.pos": float for name in self.config.joint_names}
-        for i in range(14):
-            features[f"ee_pose_{i}.pos"] = float
-        for i in range(2):
-            features[f"gripper_state_{i}.pos"] = float
+        
+        # Only add ee_pose and gripper_state for the selected arms
+        if self.config.arm_mode in ("left", "both"):
+            for i in range(0, 7):
+                features[f"ee_pose_{i}.pos"] = float
+            features["gripper_state_0.pos"] = float
+            
+        if self.config.arm_mode in ("right", "both"):
+            for i in range(7, 14):
+                features[f"ee_pose_{i}.pos"] = float
+            features["gripper_state_1.pos"] = float
+            
         # Add cameras
         for cam_key, cam in self.cameras.items():
             features[cam_key] = (cam.config.height, cam.config.width, 3)
@@ -130,8 +182,14 @@ class OpenArmRosRobot(Robot):
                 # 1. Parse joint_position array back into individual joints
                 if "joint_position" in obs_payload:
                     jp = obs_payload["joint_position"]
-                    if len(jp) == len(self.config.joint_names):
-                        for i, name in enumerate(self.config.joint_names):
+                    # ROS bridge always sends 16 elements (Both arms)
+                    if len(jp) == 16:
+                        all_names = []
+                        for side in ("left", "right"):
+                            for i in range(1, 8):
+                                all_names.append(f"openarm_{side}_joint{i}")
+                            all_names.append(f"openarm_{side}_finger_joint1")
+                        for i, name in enumerate(all_names):
                             self._latest_obs[f"{name}.pos"] = jp[i]
                             
                 # 2. Parse ee_pose
@@ -192,10 +250,24 @@ class OpenArmRosRobot(Robot):
         self._listen_thread = threading.Thread(target=self._udp_listen_loop, daemon=True)
         self._listen_thread.start()
         
-        for cam in self.cameras.values():
+        now = time.monotonic()
+        for cam_key, cam in self.cameras.items():
             cam.connect()
-            
+            # Record USB path upon successful connection
+            if hasattr(cam, 'config') and hasattr(cam.config, 'index_or_path'):
+                self._camera_usb_paths[cam_key] = _get_usb_path_for_device(cam.config.index_or_path)
+            self._camera_last_good[cam_key] = now
+            self._camera_last_recover_attempt[cam_key] = 0.0
+
         self._is_connected = True
+
+        # Start the camera auto-recovery watchdog.
+        self._watchdog_stop_event.clear()
+        self._watchdog_thread = threading.Thread(
+            target=self._camera_watchdog_loop, daemon=True, name="camera_watchdog"
+        )
+        self._watchdog_thread.start()
+
         logger.info(f"{self} connected via ROS 2 UDP Bridge.")
 
     @property
@@ -209,21 +281,70 @@ class OpenArmRosRobot(Robot):
     def configure(self) -> None:
         pass
         
+    def _reconnect_one_camera(self, cam_key: str, cam) -> bool:
+        """Reconnect a single camera. Caller MUST hold self._frames_lock.
+
+        Re-resolves the device by its remembered USB path when frozen, so a
+        camera that came back on a different /dev/video* node is recovered
+        automatically. Returns True on successful reconnect.
+        """
+        logger.info(f"Reconnecting camera {cam_key}...")
+        try:
+            cam.disconnect()
+        except Exception as e:
+            logger.debug(f"Disconnect error during reconnect for {cam_key}: {e}")
+
+        # Attempt to auto-recover device path if frozen or failed
+        if self._camera_frozen.get(cam_key, False):
+            old_path = self._camera_usb_paths.get(cam_key)
+            if old_path:
+                new_dev = _find_device_by_usb_path(old_path)
+                if new_dev and hasattr(cam, 'config'):
+                    logger.info(f"Auto-recovered {cam_key} device to {new_dev}")
+                    cam.config.index_or_path = new_dev
+
+        try:
+            cam.connect()
+            self._camera_frozen[cam_key] = False
+            self._camera_last_good[cam_key] = time.monotonic()
+            # Update USB path just in case
+            if hasattr(cam, 'config') and hasattr(cam.config, 'index_or_path'):
+                self._camera_usb_paths[cam_key] = _get_usb_path_for_device(cam.config.index_or_path)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reconnect camera {cam_key}: {e}")
+            return False
+
     def reconnect_cameras(self) -> None:
         """Disconnect and reconnect all cameras to recover from hardware freezes."""
         with self._frames_lock:
             for cam_key, cam in self.cameras.items():
-                logger.info(f"Reconnecting camera {cam_key}...")
-                try:
-                    cam.disconnect()
-                except Exception as e:
-                    logger.debug(f"Disconnect error during reconnect for {cam_key}: {e}")
-                
-                try:
-                    cam.connect()
-                    self._camera_frozen[cam_key] = False
-                except Exception as e:
-                    logger.error(f"Failed to reconnect camera {cam_key}: {e}")
+                self._reconnect_one_camera(cam_key, cam)
+
+    def _camera_watchdog_loop(self) -> None:
+        """Background thread: transparently reconnect any camera that has been
+        stalled longer than the stale threshold, so a transient USB glitch
+        self-heals without the user touching the UI."""
+        while not self._watchdog_stop_event.wait(0.5):
+            if not self._is_connected:
+                continue
+            now = time.monotonic()
+            for cam_key, cam in list(self.cameras.items()):
+                last_good = self._camera_last_good.get(cam_key, now)
+                if (now - last_good) < self._camera_stale_recover_s:
+                    continue
+                # Camera looks stalled. Rate-limit recovery attempts.
+                last_attempt = self._camera_last_recover_attempt.get(cam_key, 0.0)
+                if (now - last_attempt) < self._camera_recover_backoff_s:
+                    continue
+                self._camera_last_recover_attempt[cam_key] = now
+                logger.warning(
+                    f"Camera {cam_key} stalled for {now - last_good:.1f}s — "
+                    f"auto-recovering..."
+                )
+                with self._frames_lock:
+                    if self._reconnect_one_camera(cam_key, cam):
+                        logger.info(f"Camera {cam_key} auto-recovered.")
         
     @check_if_not_connected
     def get_observation(self):
@@ -234,6 +355,7 @@ class OpenArmRosRobot(Robot):
             try:
                 frame = cam.read_latest(max_age_ms=2000)
                 self._camera_frozen[cam_key] = False
+                self._camera_last_good[cam_key] = time.monotonic()
             except (TimeoutError, RuntimeError) as e:
                 logger.warning(f"Failed to read from {cam_key}, reusing previous frame. Error: {e}")
                 self._camera_frozen[cam_key] = True
@@ -303,13 +425,21 @@ class OpenArmRosRobot(Robot):
         self._stop_event.set()
         if self._listen_thread:
             self._listen_thread.join(timeout=1.0)
+
+        # Stop the camera watchdog before tearing down cameras so it can't
+        # try to reconnect a camera we're in the middle of disconnecting.
+        self._watchdog_stop_event.set()
+        if self._watchdog_thread:
+            self._watchdog_thread.join(timeout=2.0)
+            self._watchdog_thread = None
+
         if self.sock:
             self.sock.close()
             self.sock = None
-        
+
         for cam in self.cameras.values():
             cam.disconnect()
-            
+
         self._is_connected = False
         logger.info(f"{self} disconnected.")
 

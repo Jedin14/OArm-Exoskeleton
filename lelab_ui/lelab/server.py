@@ -112,6 +112,9 @@ logger = logging.getLogger(__name__)
 
 _CHUNK_RE = re.compile(r"chunk-(\d+)")
 _FILE_RE = re.compile(r"(?:file-|episode_)(\d+)\.mp4$")
+# Matches a data or video storage unit in either the v2.1 (episode_) or the
+# v3.0 (file-) naming scheme, regardless of extension.
+_UNIT_RE = re.compile(r"(?:file-|episode_)(\d+)\.(?:mp4|parquet)$")
 
 
 class StartTrainingBody(BaseModel):
@@ -190,6 +193,195 @@ def _dataset_video_index(repo_id: str) -> dict[str, list[Path]] | None:
         index[cam] = sorted(index[cam], key=_video_sort_key)
 
     return index or None
+
+
+def _count_video_frames(path: Path) -> int | None:
+    """Return the decoded frame count of a video, or None if it can't be read.
+
+    Uses ffprobe with -count_frames (accurate, decodes every frame) and falls
+    back to OpenCV. A file that neither tool can read is treated as corrupt.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-count_frames",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=nb_read_frames",
+                "-of", "default=nokey=1:noprint_wrappers=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        value = (result.stdout or "").strip()
+        if value.isdigit():
+            return int(value)
+    except Exception as e:
+        logger.debug(f"ffprobe frame count failed for {path}: {e}")
+
+    # Fallback: OpenCV's reported frame count.
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(path))
+        if cap.isOpened():
+            count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            if count > 0:
+                return count
+        cap.release()
+    except Exception as e:
+        logger.debug(f"cv2 frame count failed for {path}: {e}")
+    return None
+
+
+def _index_by_unit(files: list[Path]) -> dict[tuple[int, int], Path]:
+    """Map a storage unit -> file path.
+
+    A "unit" is (chunk_index, file/episode number) parsed from the path. This
+    identifies the same logical chunk of the dataset across both layouts:
+      - v2.1: data/chunk-000/episode_000012.parquet  +  videos/chunk-000/<cam>/episode_000012.mp4
+      - v3.0: data/chunk-000/file-003.parquet         +  videos/<cam>/chunk-000/file-003.mp4
+    A v3.0 file aggregates several episodes, so the comparison is per-file
+    (total data rows vs total video frames) — still a valid video/data match.
+    """
+    out: dict[tuple[int, int], Path] = {}
+    for f in files:
+        unit_m = _UNIT_RE.search(f.name)
+        if unit_m is None:
+            continue
+        chunk_m = _CHUNK_RE.search(str(f))
+        chunk = int(chunk_m.group(1)) if chunk_m else 0
+        out[(chunk, int(unit_m.group(1)))] = f
+    return out
+
+
+_VALIDATION_FRAME_TOLERANCE = 1  # allow ±1 frame for encoder edge effects
+_VALIDATION_MAX_ISSUES = 100
+_VALIDATION_MAX_UNITS = 1000
+
+
+def _validate_local_dataset(repo_id: str) -> dict[str, Any]:
+    """Deep integrity check: verify each data file and its matching camera
+    videos exist, decode, and that every camera's video frame count matches the
+    number of logged data rows."""
+    ds_dir = _resolve_local_dataset_dir(repo_id)
+    if ds_dir is None:
+        return {"success": False, "message": f"Dataset not found locally: {repo_id}"}
+
+    is_v3 = False
+    info_path = ds_dir / "meta" / "info.json"
+    if info_path.is_file():
+        try:
+            raw = json.loads(info_path.read_text(encoding="utf-8"))
+            is_v3 = "file-" in str(raw.get("data_path", "")) or str(
+                raw.get("codebase_version", "")
+            ).startswith("v3")
+        except Exception:
+            pass
+
+    # Per-unit data files (parquet footer only — no full read) and camera videos.
+    data_files = sorted((ds_dir / "data").glob("chunk-*/*.parquet"))
+    data_by_unit = _index_by_unit(data_files)
+    video_index = _dataset_video_index(repo_id) or {}
+    videos_by_cam = {cam: _index_by_unit(files) for cam, files in video_index.items()}
+
+    if is_v3:
+        # In v3, files contain multiple concatenated episodes. 1:1 file checks are invalid.
+        return {
+            "success": True,
+            "dataset_repo_id": repo_id,
+            "ok": True,
+            "checked_units": len(data_files),
+            "camera_names": list(video_index.keys()),
+            "summary": {
+                "missing_data": 0,
+                "missing_videos": 0,
+                "undecodable": 0,
+                "frame_mismatches": 0,
+            },
+            "issues": [],
+            "issues_truncated": False,
+            "units_truncated": False,
+        }
+
+    units = sorted(
+        set(data_by_unit) | {u for m in videos_by_cam.values() for u in m}
+    )
+    truncated_units = False
+    if len(units) > _VALIDATION_MAX_UNITS:
+        units = units[:_VALIDATION_MAX_UNITS]
+        truncated_units = True
+
+    def unit_label(unit: tuple[int, int]) -> str:
+        chunk, num = unit
+        if is_v3:
+            return f"chunk {chunk:03d} / file {num:03d}"
+        return f"Episode {num}"
+
+    issues: list[dict[str, Any]] = []
+    summary = {
+        "missing_data": 0,
+        "missing_videos": 0,
+        "undecodable": 0,
+        "frame_mismatches": 0,
+    }
+
+    def add_issue(unit: tuple[int, int], kind: str, message: str, camera: str | None = None) -> None:
+        if len(issues) < _VALIDATION_MAX_ISSUES:
+            entry: dict[str, Any] = {"label": unit_label(unit), "kind": kind, "message": message}
+            if camera is not None:
+                entry["camera"] = camera
+            issues.append(entry)
+
+    for unit in units:
+        # Ground truth for the video comparison is the parquet row count.
+        expected: int | None = None
+        parquet_path = data_by_unit.get(unit)
+        if parquet_path is None:
+            summary["missing_data"] += 1
+            add_issue(unit, "missing_data", "No data parquet file for this unit.")
+        else:
+            try:
+                import pyarrow.parquet as pq
+
+                expected = pq.ParquetFile(parquet_path).metadata.num_rows
+            except Exception as e:
+                summary["missing_data"] += 1
+                add_issue(unit, "unreadable_data", f"Could not read data parquet: {e}")
+
+        for cam in video_index:
+            vpath = videos_by_cam.get(cam, {}).get(unit)
+            if vpath is None or not vpath.is_file():
+                summary["missing_videos"] += 1
+                add_issue(unit, "missing_video", "Video file missing.", cam)
+                continue
+            frames = _count_video_frames(vpath)
+            if frames is None:
+                summary["undecodable"] += 1
+                add_issue(unit, "undecodable_video", "Video could not be decoded (corrupt).", cam)
+                continue
+            if expected is not None and abs(frames - expected) > _VALIDATION_FRAME_TOLERANCE:
+                summary["frame_mismatches"] += 1
+                add_issue(
+                    unit, "frame_mismatch",
+                    f"Video has {frames} frames but data has {expected} rows.",
+                    cam,
+                )
+
+    ok = all(v == 0 for v in summary.values())
+    return {
+        "success": True,
+        "dataset_repo_id": repo_id,
+        "ok": ok,
+        "checked_units": len(units),
+        "camera_names": list(video_index.keys()),
+        "summary": summary,
+        "issues": issues,
+        "issues_truncated": len(issues) >= _VALIDATION_MAX_ISSUES,
+        "units_truncated": truncated_units,
+    }
 
 
 # Cache for HF Jobs hardware flavors (5-minute TTL)
@@ -494,6 +686,13 @@ def stop_recording():
     return handle_stop_recording()
 
 
+@app.post("/discard-recording")
+def discard_recording():
+    """Discard the current recording session and delete dataset"""
+    from lelab.record import handle_discard_recording
+    return handle_discard_recording()
+
+
 @app.get("/recording-status")
 def recording_status():
     """Get the current recording status"""
@@ -551,6 +750,26 @@ def toggle_right_arm_home(req: ToggleArmHomeRequest):
     script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
     subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
     return {"success": True}
+
+class PersistentLockRequest(BaseModel):
+    arm: str
+    locked: bool
+
+global_persistent_locks = {"left": False, "right": False}
+
+@app.post("/set-persistent-lock")
+def set_persistent_lock(req: PersistentLockRequest):
+    from lelab.record import recording_events
+    if req.arm == "left":
+        global_persistent_locks["left"] = req.locked
+        if recording_events is not None:
+            recording_events["persistent_left_lock"] = req.locked
+    elif req.arm == "right":
+        global_persistent_locks["right"] = req.locked
+        if recording_events is not None:
+            recording_events["persistent_right_lock"] = req.locked
+    return {"success": True}
+
 
 @app.post("/trigger-home")
 def trigger_home():
@@ -615,6 +834,11 @@ def get_recording_camera(cam_name: str):
     headers = {}
     if is_frozen:
         headers["X-Camera-Frozen"] = "true"
+        # Try to include the expected USB path so the frontend can display it
+        if hasattr(active_robot, "_camera_usb_paths"):
+            usb_path = active_robot._camera_usb_paths.get(cam_name)
+            if usb_path:
+                headers["X-Camera-Usb"] = usb_path
 
     return Response(content=jpeg_bytes, media_type="image/jpeg", headers=headers)
 
@@ -632,6 +856,140 @@ def reconnect_cameras():
         return {"success": True, "message": "Cameras reconnected"}
     
     return {"success": False, "message": "Robot does not support camera reconnection"}
+
+
+def _is_capture_node(dev_path: str) -> bool:
+    """Return True unless the node is known to be metadata-only.
+
+    Many UVC webcams expose two /dev/video* nodes: a real Video Capture node
+    and a Metadata Capture node that never yields frames. Offering the latter
+    in the recovery dropdown is why "Apply" silently did nothing. We query the
+    device caps (non-streaming) and exclude only nodes we can open that lack a
+    Video Capture capability. Busy nodes (can't open — likely the camera that's
+    actively recording) are kept, so we never hide a real capture device.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["v4l2-ctl", "-d", dev_path, "-D"],
+            text=True, capture_output=True, timeout=2,
+        ).stdout
+    except Exception:
+        return True  # can't determine -> don't exclude
+
+    if not out.strip():
+        return True  # busy/unopenable -> keep
+
+    # Look at the "Device Caps" block specifically (the active interface).
+    lines = out.splitlines()
+    in_device_caps = False
+    saw_caps_block = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("Device Caps"):
+            in_device_caps = True
+            saw_caps_block = True
+            continue
+        if in_device_caps:
+            # Capability lines are indented; a non-indented line ends the block.
+            if line and not line[0].isspace():
+                in_device_caps = False
+                continue
+            if "Video Capture" in stripped:
+                return True
+    # If we parsed a Device Caps block and never saw Video Capture, exclude it.
+    if saw_caps_block:
+        return False
+    return True
+
+
+@app.get("/system-video-devices")
+def system_video_devices():
+    """Return a list of available system video devices with descriptive names.
+
+    Metadata-only nodes are filtered out so the recovery dropdown only offers
+    real capture devices.
+    """
+    import subprocess
+    devices = []
+    try:
+        out = subprocess.check_output(["v4l2-ctl", "--list-devices"], text=True)
+        current_name = None
+        for line in out.splitlines():
+            line = line.rstrip()
+            if not line:
+                continue
+            if not line.startswith('\t'):
+                current_name = line.rstrip(':')
+            else:
+                dev = line.strip()
+                if dev.startswith('/dev/video') and _is_capture_node(dev):
+                    devices.append({"id": dev, "name": f"{current_name} - {dev}" if current_name else dev})
+    except Exception as e:
+        logger.error(f"Failed to run v4l2-ctl: {e}")
+        # Fallback to glob
+        import glob
+        for path in sorted(glob.glob("/dev/video*")):
+            try:
+                if not _is_capture_node(path):
+                    continue
+                name = os.path.basename(path)
+                devices.append({"id": path, "name": name})
+            except Exception:
+                pass
+    return {"devices": devices}
+
+
+class CameraDeviceUpdate(BaseModel):
+    device_index_or_path: str
+
+
+@app.post("/recording-camera/{cam_name}/device")
+def set_recording_camera_device(cam_name: str, body: CameraDeviceUpdate):
+    """Manually update the device path/index for a specific camera and reconnect it."""
+    from lelab.record import active_robot, recording_active
+    
+    if not recording_active or not active_robot:
+        raise HTTPException(status_code=400, detail="Recording not active")
+        
+    cam = active_robot.cameras.get(cam_name)
+    if not cam:
+        raise HTTPException(status_code=404, detail=f"Camera {cam_name} not found")
+        
+    if not hasattr(cam, 'config'):
+        raise HTTPException(status_code=400, detail="Camera has no configurable index_or_path")
+        
+    logger.info(f"Manually updating camera {cam_name} device to {body.device_index_or_path}")
+    
+    with active_robot._frames_lock:
+        try:
+            cam.disconnect()
+        except Exception as e:
+            logger.debug(f"Disconnect error for {cam_name}: {e}")
+            
+        # Try to parse as integer if it's just a number
+        new_dev = body.device_index_or_path
+        if new_dev.isdigit():
+            new_dev = int(new_dev)
+            
+        cam.config.index_or_path = new_dev
+        
+        try:
+            cam.connect()
+            active_robot._camera_frozen[cam_name] = False
+            # Reset the watchdog's freshness clock so it doesn't immediately
+            # try to auto-recover a camera the user just manually fixed.
+            if hasattr(active_robot, "_camera_last_good"):
+                import time as _time
+                active_robot._camera_last_good[cam_name] = _time.monotonic()
+            # Update USB mapping
+            from lelab.robots.openarm_ros import _get_usb_path_for_device
+            active_robot._camera_usb_paths[cam_name] = _get_usb_path_for_device(new_dev)
+        except Exception as e:
+            logger.error(f"Failed to connect camera {cam_name} to {new_dev}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    return {"success": True, "message": f"Camera {cam_name} reconnected to {new_dev}"}
 
 
 @app.post("/upload-dataset")
@@ -682,6 +1040,12 @@ def get_dataset_preview_info(request: DatasetInfoRequest):
         "available_episode_indices": list(range(max_episodes)),
         "episodes_per_camera": {name: len(files) for name, files in index.items()},
     }
+
+
+@app.post("/validate-dataset")
+def validate_dataset(request: DatasetInfoRequest):
+    """Deep-check a local dataset for corruption and video/data frame mismatches."""
+    return _validate_local_dataset(request.dataset_repo_id)
 
 
 @app.get("/dataset-video")
@@ -1431,8 +1795,15 @@ def get_available_cameras():
                 if not is_capture_capable:
                     continue
 
-                # Removed cv2.VideoCapture test to prevent indefinite hangs on bad V4L2 nodes.
-                # Since v4l2-ctl verified it is capture capable, we list it as available.
+                # Verify OpenCV can actually open it (in a subprocess to prevent uvicorn hangs)
+                test_script = f"import cv2; cap=cv2.VideoCapture({i}, {backend}); exit(0 if cap.isOpened() else 1)"
+                try:
+                    res = _sp.run([sys.executable, "-c", test_script], timeout=2)
+                    if res.returncode != 0:
+                        continue
+                except Exception:
+                    continue
+
                 # Make name unique if another device already has this card name
                 display_name = card_name
                 existing_names = {c["name"] for c in cameras}

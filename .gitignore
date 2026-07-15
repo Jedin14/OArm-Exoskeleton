@@ -21,3 +21,4 @@ __pycache__/
 
 # Core dumps
 core
+visualize_episodes/
