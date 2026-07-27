@@ -71,7 +71,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
           role="combobox"
           aria-expanded={open}
           disabled={isLoading}
-          className="w-full justify-between bg-gray-900 border-gray-700 text-white hover:bg-gray-700 hover:text-white font-normal"
+          className="w-full justify-between bg-gray-900 border-gray-700 text-white hover:bg-gray-700 hover:text-white font-normal text-lg py-6"
         >
           <span className={cn("truncate", selectedName ? "" : "text-gray-400")}>
             {isLoading

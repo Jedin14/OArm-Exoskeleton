@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { ChevronsUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import LandingTopBar from "@/components/landing/LandingTopBar";
+
 import Footer from "@/components/Footer";
 import RobotConfigManager from "@/components/landing/RobotConfigManager";
 import RecordingModal from "@/components/landing/RecordingModal";
@@ -323,9 +323,9 @@ const Landing = () => {
   return (
     <div
       className="min-h-screen bg-black text-white pb-16"
-      style={{ ["--lelab-topbar-h" as string]: "48px" }}
+      style={{ ["--lelab-topbar-h" as string]: "136px" }}
     >
-      <LandingTopBar />
+
 
       <div
         className="sticky z-20 bg-black/95 backdrop-blur supports-[backdrop-filter]:bg-black/70 border-b border-gray-800"
@@ -343,7 +343,7 @@ const Landing = () => {
           />
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-left h-10 flex items-center">
+              <h3 className="font-semibold text-2xl text-left h-12 flex items-center">
                 Dataset
               </h3>
               <DatasetPicker
@@ -356,7 +356,7 @@ const Landing = () => {
                 <Button
                   variant="outline"
                   role="combobox"
-                  className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700"
+                  className="w-full justify-between bg-gray-800 border-gray-600 text-white hover:bg-gray-700 text-lg py-6"
                 >
                   <span className="truncate text-gray-300">
                     {datasetsLoading
@@ -368,14 +368,14 @@ const Landing = () => {
               </DatasetPicker>
             </div>
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
-              <h3 className="font-semibold text-lg text-left h-10 flex items-center">
+              <h3 className="font-semibold text-2xl text-left h-12 flex items-center">
                 Create a model
               </h3>
               <Button
                 onClick={handleTrainingClick}
-                className="w-full bg-green-500 hover:bg-green-600 text-white"
+                className="w-full bg-green-500 hover:bg-green-600 text-white text-lg py-6"
               >
-                Training
+                Training (Experimental state)
               </Button>
             </div>
           </div>

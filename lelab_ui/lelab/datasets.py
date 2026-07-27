@@ -114,6 +114,16 @@ def list_local_datasets() -> list[dict[str, Any]]:
                         "codebase_version": _get_codebase_version(sub)
                     }
                 )
+            elif _is_dataset_dir(sub / sub.name):
+                # Handle zip-extracted nested layouts: JedEYE14/DS/DS/meta/info.json
+                out.append(
+                    {
+                        "repo_id": f"{top.name}/{sub.name}",
+                        "last_modified": _dir_mtime_iso(sub / sub.name),
+                        "private": False,
+                        "codebase_version": _get_codebase_version(sub / sub.name)
+                    }
+                )
 
     return sorted(out, key=lambda x: x["last_modified"] or "", reverse=True)
 

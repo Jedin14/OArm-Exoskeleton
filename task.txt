@@ -16,7 +16,7 @@ BeastVLA_v3_demo
 
 pick packet and place it in box
 
-main_camera
+
 left_camera
 right_camera
 

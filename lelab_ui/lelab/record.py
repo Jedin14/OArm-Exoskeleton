@@ -95,6 +95,60 @@ class SetEpisodeTaskRequest(BaseModel):
     task: str
 
 
+def _record_sync_timestamp(robot, events: dict, dataset) -> None:
+    """Record source timing in a sidecar without adding policy inputs."""
+    if not hasattr(robot, "get_sync_diagnostics"):
+        return
+    diagnostics = robot.get_sync_diagnostics()
+    state_ts = float(diagnostics.get("observation.timestamp", 0.0))
+    action_ts = float(diagnostics.get("action.timestamp", 0.0))
+    camera_ts = float(diagnostics.get("camera.timestamp", 0.0))
+    sync_ts = float(diagnostics.get("sync.timestamp", 0.0))
+    if not state_ts and not action_ts and not camera_ts:
+        return
+
+    episode_index = getattr(dataset, "num_episodes", None)
+    if episode_index is None:
+        episode_index = getattr(getattr(dataset, "meta", None), "total_episodes", 0)
+    frame_index = int(events.get("_sync_frame_index", 0))
+    row = {
+        "episode_index": int(episode_index),
+        "frame_index": frame_index,
+        "state_timestamp": state_ts,
+        "action_timestamp": action_ts,
+        "camera_timestamp": camera_ts,
+        "state_ros_timestamp": float(diagnostics.get("observation.ros_timestamp", 0.0)),
+        "action_ros_timestamp": float(diagnostics.get("action.ros_timestamp", 0.0)),
+        "sync_timestamp": sync_ts,
+        "state_action_delta": abs(state_ts - action_ts),
+        "state_camera_delta": abs(state_ts - camera_ts),
+        "action_camera_delta": abs(action_ts - camera_ts),
+        "max_delta": max(abs(state_ts - action_ts), abs(state_ts - camera_ts), abs(action_ts - camera_ts)),
+    }
+    for key, value in diagnostics.items():
+        if key.startswith("camera.") and key.endswith(".timestamp"):
+            camera_name = key[len("camera.") : -len(".timestamp")]
+            row[f"camera_{camera_name}_timestamp"] = float(value)
+    events.setdefault("_sync_rows", []).append(row)
+    events["_sync_frame_index"] = frame_index + 1
+
+
+def _write_sync_sidecar(dataset, events: dict) -> None:
+    rows = events.get("_sync_rows", [])
+    if not rows or not getattr(dataset, "root", None):
+        return
+    import pandas as pd
+    from pathlib import Path
+
+    path = Path(dataset.root) / "meta" / "sync_timestamps.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output = pd.DataFrame(rows)
+    if path.exists():
+        output = pd.concat([pd.read_parquet(path), output], ignore_index=True)
+    output.to_parquet(path, index=False)
+    logger.info("Wrote synchronization sidecar: %s (%d rows)", path, len(output))
+
+
 def _extract_camera_names_from_features(features: list[str]) -> list[str]:
     """Extract logical camera names from LeRobot feature keys.
 
@@ -377,7 +431,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
             )
 
     # Create robot config
-    if "openarm_ros" in request.follower_port:
+    if "openarm_ros" in request.follower_port or "ROS2 (humble)" in request.follower_port:
         from lelab.robots.openarm_ros import OpenArmRosRobotConfig, PassiveROSTeleopConfig
         # Skip calibration for ROS bridge — it doesn't use lerobot hardware calibration
         robot_config = OpenArmRosRobotConfig(
@@ -528,16 +582,26 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 while recording_active:
                     if active_robot and hasattr(active_robot, 'latest_buttons'):
                         btns = active_robot.latest_buttons
-                        if len(btns) >= 8 and len(last_buttons) >= 8:
-                            # Button A (index 5) -> exit_early (Skip to next episode / start recording)
-                            if btns[5] == 1 and last_buttons[5] == 0:
+                        # /exo/gamepad_keys layout:
+                        #   left:  4=joystick, 5=A, 6=B, 7=C
+                        #   right: 10=joystick, 11=A, 12=B, 13=C
+                        # Physical mapping for this exoskeleton:
+                        #   A/red  -> finish current episode / advance
+                        #   B/blue -> pause or resume recording
+                        #   C/white -> re-record current episode
+                        if len(btns) >= 14 and len(last_buttons) >= 14:
+                            rising = [
+                                index for index in (5, 6, 7, 11, 12, 13)
+                                if btns[index] == 1 and last_buttons[index] == 0
+                            ]
+                            # Trigger each logical color at most once when
+                            # both handles are pressed together.
+                            if any(index in rising for index in (5, 11)):
                                 handle_exit_early()
-                            # Button B (index 6) -> rerecord_episode
-                            if btns[6] == 1 and last_buttons[6] == 0:
+                            elif any(index in rising for index in (6, 12)):
+                                handle_toggle_pause()
+                            elif any(index in rising for index in (7, 13)):
                                 handle_rerecord_episode()
-                            # Button C (index 7) -> stop_recording
-                            if btns[7] == 1 and last_buttons[7] == 0:
-                                stop_recording()
                         last_buttons = btns
                     time.sleep(0.05)
             
@@ -570,8 +634,11 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                         dataset.finalize()
                     import shutil
                     if dataset.root and dataset.root.exists():
-                        shutil.rmtree(dataset.root, ignore_errors=True)
-                        logger.info(f"Deleted dataset directory {dataset.root}")
+                        if not getattr(request, "resume", False):
+                            shutil.rmtree(dataset.root, ignore_errors=True)
+                            logger.info(f"Deleted dataset directory {dataset.root}")
+                        else:
+                            logger.info(f"Session discarded. Root directory {dataset.root} was NOT deleted because this was a resumed dataset.")
                     current_phase = "discarded"
                     last_recording_info = {"success": False, "error": "Recording was discarded by user."}
                 else:
@@ -585,12 +652,14 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                         "dataset_repo_id": request.dataset_repo_id,
                         "num_episodes": dataset.num_episodes,
                         "single_task": request.single_task,
+                        "tasks": [request.single_task],
                         "fps": dataset.fps,
                         "features": features,
                         "camera_names": _extract_camera_names_from_features(features),
                         "total_frames": dataset.num_frames,
                         "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
                         "codebase_version": request.dataset_version,
+                        "arm_mode": request.arm_mode,
                     }
             except Exception as e:
                 import traceback
@@ -1323,6 +1392,7 @@ def custom_record_loop(
 
         # Write to dataset
         if dataset is not None:
+            _record_sync_timestamp(robot, events, dataset)
             if events.get("_captured_home_state") is None:
                 # Capture the raw state as the true home state!
                 try:
@@ -1381,6 +1451,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
     from lerobot.utils.utils import log_say
 
     global current_phase, phase_start_time, current_episode, saved_episodes, active_robot
+
+    web_events.setdefault("_sync_rows", [])
 
     if getattr(cfg.robot, "type", "") == "openarm_ros":
         from lelab.robots.openarm_ros import OpenArmRosRobot
@@ -1578,6 +1650,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 # RECORDING PHASE - with dataset (matches original record.py exactly)
                 current_phase = "recording"
                 phase_start_time = time.time()
+                web_events["_sync_frame_index"] = 0
                 logger.info(f"Starting recording phase for episode {current_episode}")
                 logger.info(f"Events state at start of recording phase: {web_events}")
                 print(
@@ -1774,6 +1847,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                         logger.info("🛑 STOP RECORDING requested during reset phase - ending session")
                         print("🛑 STATUS CHANGE: Stop recording requested during reset - ending session")
                         break
+
+        _write_sync_sidecar(dataset, web_events)
 
         # Recording completed
         current_phase = "completed"

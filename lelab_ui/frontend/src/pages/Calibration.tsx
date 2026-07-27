@@ -25,6 +25,10 @@ import {
   Play,
   Square,
   Circle,
+  Lock,
+  Unlock,
+  RotateCcw,
+  Save,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
@@ -83,6 +87,7 @@ const Calibration = () => {
 
   const [deviceType, setDeviceType] = useState<string>("teleop");
   const [port, setPort] = useState<string>("");
+  const [isPortLocked, setIsPortLocked] = useState<boolean>(true);
   const [robot, setRobot] = useState<RobotRecord | null>(null);
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   const cameraSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -242,14 +247,14 @@ const Calibration = () => {
     }
 
     // Bypass calibration for ROS 2 Bridge
-    if (port.startsWith("openarm_ros")) {
+    if (port.startsWith("openarm_ros") || port.startsWith("ROS2 (humble)")) {
       try {
         const payload = deviceType === "robot" 
           ? { follower_port: port, follower_config: robotName } 
           : { leader_port: port, leader_config: robotName };
           
         await fetchWithHeaders(
-          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+          `${baseUrl}/robots/${encodeURIComponent(robotName!)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -598,13 +603,37 @@ const Calibration = () => {
                     onChange={(e) => setPort(e.target.value)}
                     placeholder="/dev/tty.usbmodem..."
                     className="bg-slate-700 border-slate-600 text-white rounded-md flex-1"
+                    disabled={isPortLocked}
                   />
-                  <PortDetectionButton
-                    onClick={handlePortDetection}
-                    robotType={deviceType === "robot" ? "follower" : "leader"}
-                    className="border-slate-600 hover:border-blue-500 text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600"
-                  />
+                  {isPortLocked ? (
+                    <Button variant="outline" onClick={() => setIsPortLocked(false)} className="border-slate-600 bg-slate-700 hover:bg-slate-600 hover:text-white" title="Unlock Port">
+                      <Lock className="w-4 h-4" />
+                    </Button>
+                  ) : (
+                    <>
+                      <Button variant="outline" onClick={() => { setPort("ROS2 (humble)"); setIsPortLocked(true); }} className="border-slate-600 bg-slate-700 hover:bg-slate-600 hover:text-white" title="Reset to default">
+                        <RotateCcw className="w-4 h-4 mr-2" />
+                        Reset
+                      </Button>
+                      <Button onClick={() => setIsPortLocked(true)} className="bg-blue-600 hover:bg-blue-700 text-white" title="Save port">
+                        <Save className="w-4 h-4 mr-2" />
+                        Save
+                      </Button>
+                    </>
+                  )}
+                  {!isPortLocked && (
+                    <PortDetectionButton
+                      onClick={handlePortDetection}
+                      robotType={deviceType === "robot" ? "follower" : "leader"}
+                      className="border-slate-600 hover:border-blue-500 text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600"
+                    />
+                  )}
                 </div>
+                {(port.startsWith("ROS2 (humble)") || port.startsWith("openarm_ros")) && (
+                  <div className="text-xs text-blue-400 mt-2 font-mono">
+                    Subscribing to: /joint_states, /tf, /robot_description
+                  </div>
+                )}
               </div>
 
               <Separator className="bg-slate-700" />
@@ -858,39 +887,7 @@ const Calibration = () => {
                   </Alert>
                 ))}
 
-              <div
-                ref={demoVideoRef}
-                className="bg-slate-900/50 p-4 rounded-lg border border-slate-700"
-              >
-                <h4 className="font-semibold mb-3 text-slate-200">
-                  Calibration Demo:
-                </h4>
-                <div className="relative rounded-lg overflow-hidden bg-slate-800">
-                  <video
-                    className="w-full h-auto rounded-md"
-                    controls
-                    preload="auto"
-                    muted
-                  >
-                    <source
-                      src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                      type="video/mp4"
-                    />
-                    <p className="text-slate-400 text-sm text-center py-4">
-                      Your browser does not support the video tag.
-                      <br />
-                      <a
-                        href="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/calibrate_so101_2.mp4"
-                        className="text-blue-400 hover:text-blue-300 underline"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Click here to view the calibration video
-                      </a>
-                    </p>
-                  </video>
-                </div>
-              </div>
+              {/* Calibration Demo removed as requested */}
             </CardContent>
           </Card>
         </div>

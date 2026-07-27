@@ -19,11 +19,11 @@ const HfAuthChip: React.FC = () => {
   if (auth.status === "authenticated") {
     return (
       <div
-        className="inline-flex items-center gap-2 rounded-full border border-gray-800 bg-gray-900/60 px-3 py-1 text-xs text-gray-200"
+        className="inline-flex items-center gap-3 rounded-full border border-gray-800 bg-gray-900/60 px-6 py-4 text-xl text-gray-200"
         title="Hugging Face authenticated"
       >
         <span
-          className="h-2 w-2 rounded-full bg-emerald-400"
+          className="h-4 w-4 rounded-full bg-emerald-400"
           aria-hidden="true"
         />
         <span>{auth.username}</span>
@@ -37,11 +37,11 @@ const HfAuthChip: React.FC = () => {
       <button
         type="button"
         onClick={() => setDialogOpen(true)}
-        className="inline-flex items-center gap-2 rounded-full border border-amber-700/60 bg-amber-950/40 px-3 py-1 text-xs text-amber-100 hover:bg-amber-900/40 transition-colors"
+        className="inline-flex items-center gap-3 rounded-full border border-amber-700/60 bg-amber-950/40 px-6 py-4 text-xl text-amber-100 hover:bg-amber-900/40 transition-colors"
         aria-label="Hugging Face not configured — show login instructions"
       >
         <span
-          className="h-2 w-2 rounded-full bg-amber-400"
+          className="h-4 w-4 rounded-full bg-amber-400"
           aria-hidden="true"
         />
         <span>HF not configured</span>

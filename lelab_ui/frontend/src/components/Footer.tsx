@@ -15,7 +15,7 @@ const DiscordIcon: React.FC<{ className?: string }> = ({ className }) => (
 
 const links = [
   {
-    href: "https://github.com/huggingface/lerobot",
+    href: "https://github.com/Jedin14",
     label: "GitHub",
     Icon: Github,
   },
@@ -44,7 +44,8 @@ const Footer: React.FC = () => {
             className="font-medium text-gray-200 hover:text-white"
           >
             LeRobot
-          </a>
+          </a>{" "}
+          inspired by LeLab
         </span>
         <nav className="flex items-center gap-4">
           {links.map(({ href, label, Icon }) => (

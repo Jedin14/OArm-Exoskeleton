@@ -1046,8 +1046,9 @@ const Recording = () => {
         <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
           <AlertDialogHeader>
             <AlertDialogTitle>Discard recording?</AlertDialogTitle>
-            <AlertDialogDescription className="text-gray-400">
-              Are you sure you want to discard this entire session? All recorded episodes will be completely deleted and this cannot be undone.
+            <AlertDialogDescription>
+              Are you sure you want to discard the current ongoing episode and stop the session? 
+              (If this is a brand new dataset, the dataset will be deleted. If you are resuming an existing dataset, previously saved episodes are kept safe.)
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1058,7 +1059,7 @@ const Recording = () => {
               onClick={confirmDiscardRecording}
               className="bg-red-500 hover:bg-red-600 text-white"
             >
-              Discard Dataset
+              Discard Session
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -7,6 +7,7 @@ import time
 from functools import cached_property
 import os
 import glob
+from collections import deque
 
 import numpy as np
 from lerobot.robots import RobotConfig, Robot
@@ -112,6 +113,13 @@ class OpenArmRosRobot(Robot):
         # Dictionaries to store the latest values
         self._latest_obs = {}
         self._latest_action = {}
+        self._latest_obs_timestamp = 0.0
+        self._action_timestamps = {}
+        self._action_ros_timestamps = {}
+        self._data_lock = threading.Lock()
+        self._action_history = deque(maxlen=2000)
+        self._last_sync_timestamp = 0.0
+        self._last_sync_diagnostics = {}
         
         # Buffer for latest JPEG frames for web preview
         self._latest_frames = {}
@@ -175,47 +183,54 @@ class OpenArmRosRobot(Robot):
             try:
                 data, _ = self.sock.recvfrom(65535)
                 payload = json.loads(data.decode('utf-8'))
-                
-                # Update observation
+                received_at = time.monotonic()
+                observation_timestamp = float(payload.get("observation_timestamp", received_at))
+                observation_ros_timestamp = float(payload.get("observation_ros_timestamp", 0.0))
+                action_timestamps = payload.get("action_timestamps", {})
+                action_ros_timestamps = payload.get("action_ros_timestamps", {})
                 obs_payload = payload.get("observation", {})
-                
-                # 1. Parse joint_position array back into individual joints
-                if "joint_position" in obs_payload:
-                    jp = obs_payload["joint_position"]
-                    # ROS bridge always sends 16 elements (Both arms)
-                    if len(jp) == 16:
-                        all_names = []
-                        for side in ("left", "right"):
-                            for i in range(1, 8):
-                                all_names.append(f"openarm_{side}_joint{i}")
-                            all_names.append(f"openarm_{side}_finger_joint1")
-                        for i, name in enumerate(all_names):
-                            self._latest_obs[f"{name}.pos"] = jp[i]
-                            
-                # 2. Parse ee_pose
-                if "ee_pose" in obs_payload:
-                    for i, val in enumerate(obs_payload["ee_pose"]):
-                        self._latest_obs[f"ee_pose_{i}.pos"] = float(val)
-                    
-                # 3. Parse gripper_state
-                if "gripper_state" in obs_payload:
-                    for i, val in enumerate(obs_payload["gripper_state"]):
-                        self._latest_obs[f"gripper_state_{i}.pos"] = float(val)
-                    
-                # Backward compatibility for any direct keys
-                for k, v in obs_payload.items():
-                    if f"{k}.pos" in self._latest_obs:
-                        self._latest_obs[f"{k}.pos"] = v
-                        
-                # Update action
-                for k, v in payload.get("action", {}).items():
-                    if f"{k}.pos" in self._latest_action:
-                        self._latest_action[f"{k}.pos"] = v
-                        
-                # Update buttons
-                if "buttons" in payload:
-                    self._latest_buttons = payload["buttons"]
-                        
+
+                with self._data_lock:
+                    # Parse the bridge's ordered joint_position array.
+                    if "joint_position" in obs_payload:
+                        jp = obs_payload["joint_position"]
+                        if len(jp) == 16:
+                            all_names = []
+                            for side in ("left", "right"):
+                                for i in range(1, 8):
+                                    all_names.append(f"openarm_{side}_joint{i}")
+                                all_names.append(f"openarm_{side}_finger_joint1")
+                            for i, name in enumerate(all_names):
+                                self._latest_obs[f"{name}.pos"] = jp[i]
+
+                    if "ee_pose" in obs_payload:
+                        for i, val in enumerate(obs_payload["ee_pose"]):
+                            self._latest_obs[f"ee_pose_{i}.pos"] = float(val)
+
+                    if "gripper_state" in obs_payload:
+                        for i, val in enumerate(obs_payload["gripper_state"]):
+                            self._latest_obs[f"gripper_state_{i}.pos"] = float(val)
+
+                    for k, v in obs_payload.items():
+                        if f"{k}.pos" in self._latest_obs:
+                            self._latest_obs[f"{k}.pos"] = v
+                    self._latest_obs_timestamp = observation_timestamp
+                    self._last_sync_diagnostics["observation.ros_timestamp"] = observation_ros_timestamp
+
+                    for k, v in payload.get("action", {}).items():
+                        if f"{k}.pos" in self._latest_action:
+                            key = f"{k}.pos"
+                            self._latest_action[key] = v
+                            self._action_timestamps[key] = float(action_timestamps.get(k, received_at))
+                            self._action_ros_timestamps[key] = float(action_ros_timestamps.get(k, 0.0))
+                    if self._latest_action:
+                        self._action_history.append(
+                            (received_at, self._latest_action.copy(), self._action_timestamps.copy())
+                        )
+
+                    if "buttons" in payload:
+                        self._latest_buttons = payload["buttons"]
+
             except socket.timeout:
                 pass
             except Exception as e:
@@ -349,11 +364,22 @@ class OpenArmRosRobot(Robot):
     @check_if_not_connected
     def get_observation(self):
         obs = self._latest_obs.copy()
+        sync_timestamp = time.monotonic()
         
         # Capture images from cameras and store latest frames for preview
         for cam_key, cam in self.cameras.items():
+            frame_timestamp = self._last_sync_diagnostics.get(
+                f"camera.{cam_key}.timestamp", time.monotonic()
+            )
             try:
-                frame = cam.read_latest(max_age_ms=2000)
+                # Newer LeRobot camera backends expose async_read(); older
+                # local builds expose read_latest().  In either case record
+                # the local monotonic acquisition time for synchronization.
+                if hasattr(cam, "read_latest"):
+                    frame = cam.read_latest(max_age_ms=2000)
+                else:
+                    frame = cam.async_read(timeout_ms=2000)
+                frame_timestamp = time.monotonic()
                 self._camera_frozen[cam_key] = False
                 self._camera_last_good[cam_key] = time.monotonic()
             except (TimeoutError, RuntimeError) as e:
@@ -366,6 +392,7 @@ class OpenArmRosRobot(Robot):
             
             obs[cam_key] = frame
             self._latest_obs[cam_key] = frame
+            self._last_sync_diagnostics[f"camera.{cam_key}.timestamp"] = frame_timestamp
             
             # Encode frame as JPEG for the web preview endpoint
             if frame is not None:
@@ -380,6 +407,22 @@ class OpenArmRosRobot(Robot):
                 except Exception as e:
                     logger.debug(f"Failed to encode frame for {cam_key}: {e}")
             
+        with self._data_lock:
+            # Use one common target after all modalities have been acquired.
+            # State is held/interpreted at its latest ROS sample, while camera
+            # frames are the latest frames available at this point in time.
+            # The action selector then chooses commands at or before this
+            # target, avoiding future-action leakage into the training row.
+            camera_timestamps = [
+                value for key, value in self._last_sync_diagnostics.items()
+                if key.startswith("camera.") and key.endswith(".timestamp")
+            ]
+            sync_timestamp = max(
+                [sync_timestamp, self._latest_obs_timestamp, *camera_timestamps]
+            )
+            self._last_sync_timestamp = sync_timestamp
+            self._last_sync_diagnostics["observation.timestamp"] = self._latest_obs_timestamp
+            self._last_sync_diagnostics["sync.timestamp"] = sync_timestamp
         return obs
 
     def get_latest_frame_jpeg(self, cam_key: str) -> tuple[bytes | None, bool]:
@@ -404,6 +447,51 @@ class OpenArmRosRobot(Robot):
                 clean_name = key[:-4]
                 positions[clean_name] = round(val, 4)
         return positions
+
+    def get_action_at_sync_time(self) -> dict[str, float]:
+        """Return the action that existed at the observation row timestamp.
+
+        Per-joint timestamps prevent a newly arrived command for one arm from
+        being paired with an observation that predates that command.
+        """
+        with self._data_lock:
+            target = self._last_sync_timestamp or time.monotonic()
+            selected = {}
+            selected_ts = {}
+            for _received_at, values, timestamps in self._action_history:
+                for key, value in values.items():
+                    ts = timestamps.get(key, _received_at)
+                    if ts <= target and ts >= selected_ts.get(key, float("-inf")):
+                        selected[key] = value
+                        selected_ts[key] = ts
+            if not selected:
+                selected = self._latest_action.copy()
+            self._last_sync_diagnostics["action.timestamp"] = max(selected_ts.values(), default=0.0)
+            self._last_sync_diagnostics["action_age_ms"] = (
+                max(0.0, target - max(selected_ts.values())) * 1000.0
+                if selected_ts else None
+            )
+            if selected_ts:
+                self._last_sync_diagnostics["max_action_age_ms"] = max(
+                    max(0.0, target - ts) * 1000.0 for ts in selected_ts.values()
+                )
+            return selected
+
+    def get_sync_diagnostics(self) -> dict:
+        with self._data_lock:
+            diagnostics = dict(self._last_sync_diagnostics)
+            camera_ts = [
+                value for key, value in diagnostics.items()
+                if key.startswith("camera.") and key.endswith(".timestamp")
+            ]
+            diagnostics["camera.timestamp"] = max(camera_ts, default=0.0)
+            diagnostics["camera.min_timestamp"] = min(camera_ts, default=0.0)
+            diagnostics["camera.max_timestamp"] = max(camera_ts, default=0.0)
+            action_ros = [
+                value for value in self._action_ros_timestamps.values() if value > 0.0
+            ]
+            diagnostics["action.ros_timestamp"] = max(action_ros, default=0.0)
+            return diagnostics
 
     @property
     def latest_buttons(self) -> list[int]:
@@ -488,6 +576,8 @@ class PassiveROSTeleop(Teleoperator):
     def get_action(self):
         from lelab.record import active_robot
         if active_robot is not None and hasattr(active_robot, 'send_action'):
+            if hasattr(active_robot, 'get_action_at_sync_time'):
+                return active_robot.get_action_at_sync_time()
             return active_robot.send_action(None)
         return {}
 

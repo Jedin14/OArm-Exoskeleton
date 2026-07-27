@@ -16,6 +16,7 @@ import DatasetPreview from "@/pages/DatasetPreview";
 
 import NotFound from "@/pages/NotFound";
 import SingleTabGuard from "@/components/SingleTabGuard";
+import GlobalTopBar from "@/components/GlobalTopBar";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { ApiProvider } from "./contexts/ApiContext";
 import { HfAuthProvider } from "./contexts/HfAuthContext";
@@ -33,6 +34,7 @@ function App() {
                 <DragAndDropProvider>
                   <BrowserRouter>
                     <SingleTabGuard>
+                      <GlobalTopBar />
                       <Routes>
                         <Route path="/" element={<Landing />} />
                         <Route path="/teleoperation" element={<Teleoperation />} />
