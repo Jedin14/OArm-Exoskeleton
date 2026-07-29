@@ -64,10 +64,15 @@ interface RecordingConfig {
   fps: number;
   video: boolean;
   push_to_hub: boolean;
-  resume: boolean;
-  streaming_encoding: boolean;
+  resume?: boolean;
+  streaming_encoding?: boolean;
+  vcodec?: string;
+  cameras: Record<string, any>;
+  test_mode?: boolean;
+  dataset_version?: string;
   arm_mode?: string;
-  cameras?: Record<string, any>;
+  home_position_id?: string;
+  robot_name?: string;
 }
 
 type Phase = "preparing" | "recording" | "resetting" | "completed";
@@ -92,6 +97,7 @@ interface BackendStatus {
   };
   joint_positions?: Record<string, number>;
   current_task?: string;
+  error?: string | null;
 }
 
 const Recording = () => {
@@ -219,23 +225,18 @@ const Recording = () => {
     persistentLeftLockRef.current = true;
     persistentRightLockRef.current = true;
     try {
-      await fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, {
-        method: "POST",
-        body: JSON.stringify({ fixed: true })
-      });
       await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
         method: "POST",
         body: JSON.stringify({ arm: "left", locked: true })
-      });
-      await fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, {
-        method: "POST",
-        body: JSON.stringify({ fixed: true })
       });
       await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
         method: "POST",
         body: JSON.stringify({ arm: "right", locked: true })
       });
-      toast({ title: "Arms Locked to Home", description: "Both arms are securely locked to home. Click the unlock buttons to release them." });
+      await fetchWithHeaders(`${baseUrl}/trigger-home-now`, {
+        method: "POST"
+      });
+      toast({ title: "Arms Locked to Home", description: "Both arms are securely locked to the selected home position. Click the unlock buttons to release them." });
     } catch (e) {
       console.error(e);
     } finally {
@@ -354,7 +355,9 @@ const Recording = () => {
           } else {
             toast({
               title: "Recording Failed",
-              description: "The backend recording session encountered an error. Please check your cameras or logs and try again.",
+              description:
+                status.error ||
+                "The backend recording session encountered an error. Please check your cameras or logs and try again.",
               variant: "destructive",
             });
             navigate(-1);

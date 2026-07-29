@@ -42,7 +42,7 @@ class ExoskeletonBridgeNode(Node):
         self.declare_parameter('gripper_max_position_m', 0.050)
         self.declare_parameter('gripper_close_extra_m', 0.0)
         self.declare_parameter('enable_boot_homing', True)
-        self.declare_parameter('boot_homing_duration_sec', 3.0)
+        self.declare_parameter('boot_homing_duration_sec', 8.0)
         self.declare_parameter('boot_homing_arm_target', [0.0] * 7)
         self.declare_parameter('boot_homing_gripper_target', 0.044)
 
@@ -116,6 +116,7 @@ class ExoskeletonBridgeNode(Node):
         self.transition_start_time = {'left': 0.0, 'right': 0.0}
         self.transition_start_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
         self.transition_start_gripper = {'left': 0.0, 'right': 0.0}
+        self.transition_duration = {'left': 8.0, 'right': 8.0}
         from std_msgs.msg import String
         import json
         self.ui_command_sub = self.create_subscription(String, '/exo/ui_command', self.ui_command_callback, 10)
@@ -150,12 +151,26 @@ class ExoskeletonBridgeNode(Node):
             elif action == 'toggle_right_home':
                 self.right_fixed_home = bool(data.get('value', False))
                 self.get_logger().info(f"UI Command: Right arm home fixed = {self.right_fixed_home}")
+            elif action == 'home_all':
+                self.left_fixed_home = True
+                self.right_fixed_home = True
+                self.get_logger().info(f"UI Command: Both arms home fixed = True (home_all)")
             elif action == 'set_home_target':
                 self.custom_home_left = data.get('left_arm')
                 self.custom_home_right = data.get('right_arm')
                 self.custom_gripper_left = data.get('left_gripper')
                 self.custom_gripper_right = data.get('right_gripper')
-                self.get_logger().info("UI Command: Custom home target updated")
+                
+                if data.get('lock_all', False):
+                    self.left_fixed_home = True
+                    self.right_fixed_home = True
+                
+                # Force the control_loop to compute a fresh transition (and duration!)
+                # by invalidating the lock state so the state-change detector fires on the next tick.
+                for side in ('left', 'right'):
+                    self.lock_state[side] = not (self.left_fixed_home if side == 'left' else self.right_fixed_home)
+                    
+                self.get_logger().info("UI Command: Custom home target updated (triggered dynamic transition)")
         except Exception as e:
             self.get_logger().error(f"Error parsing ui_command: {e}")
 
@@ -343,16 +358,7 @@ class ExoskeletonBridgeNode(Node):
         for side in ('left', 'right'):
             is_locked = (side == 'left' and self.left_fixed_home) or (side == 'right' and self.right_fixed_home)
             
-            # Detect state change
-            if is_locked != self.lock_state[side]:
-                self.lock_state[side] = is_locked
-                self.transition_start_time[side] = now_sec
-                self.transition_start_arm[side] = self.cmd_arm[side].copy()
-                self.transition_start_gripper[side] = self.cmd_gripper[side]
-                action_str = "Locking to home" if is_locked else "Unlocking to exoskeleton"
-                self.get_logger().info(f"{side.capitalize()} arm: {action_str} with {self.boot_homing_duration_sec}s slow transition.")
-
-            # Calculate raw target based on lock state
+            # Calculate raw target based on lock state (needed BEFORE checking state change to compute distance)
             if is_locked:
                 if side == 'left' and getattr(self, 'custom_home_left', None) is not None:
                     target_arm = np.array(self.custom_home_left, dtype=float)
@@ -369,10 +375,32 @@ class ExoskeletonBridgeNode(Node):
                 target_arm = self.input_arm[side] if self.have_input[side] else self.cmd_arm[side]
                 target_gripper = self.input_gripper[side] if self.have_input[side] else self.cmd_gripper[side]
 
-            # Apply slow transition if within the 3 second window
+            # Detect state change
+            if is_locked != self.lock_state[side]:
+                self.lock_state[side] = is_locked
+                self.transition_start_time[side] = now_sec
+                self.transition_start_arm[side] = self.cmd_arm[side].copy()
+                self.transition_start_gripper[side] = self.cmd_gripper[side]
+                
+                # Compute distance-based duration to prevent overly fast motions
+                max_dist = float(np.max(np.abs(target_arm - self.transition_start_arm[side])))
+                if is_locked:
+                    # Homing motion (end of episode / home button)
+                    # User requested fast homing, max 5 seconds
+                    computed_duration = min(5.0, max(2.0, max_dist / 0.5))
+                else:
+                    # Unlocking to exoskeleton - must be slow and safe to avoid motor kills
+                    computed_duration = max(8.0, max_dist / 0.15)
+                    
+                self.transition_duration[side] = computed_duration
+                
+                action_str = "Locking to home" if is_locked else "Unlocking to exoskeleton"
+                self.get_logger().info(f"{side.capitalize()} arm: {action_str} with {self.transition_duration[side]:.1f}s transition.")
+
+            # Apply slow transition if within the dynamic window
             time_since_transition = now_sec - self.transition_start_time[side]
-            if time_since_transition < self.boot_homing_duration_sec:
-                progress = time_since_transition / self.boot_homing_duration_sec
+            if time_since_transition < self.transition_duration[side]:
+                progress = time_since_transition / self.transition_duration[side]
                 desired_arm = (1.0 - progress) * self.transition_start_arm[side] + progress * target_arm
                 desired_gripper = (1.0 - progress) * self.transition_start_gripper[side] + progress * target_gripper
             else:
@@ -386,8 +414,18 @@ class ExoskeletonBridgeNode(Node):
                 np.clip(desired_gripper, self.gripper_min_position_m, self.gripper_max_position_m)
             )
 
+            # Determine effective max_delta and alpha for this tick
+            # During automated transitions, the trajectory is already speed-limited by transition_duration.
+            # We bypass individual joint clipping and smoothing lag so all joints stay perfectly coordinated and arrive exactly on time.
+            if time_since_transition < self.transition_duration[side]:
+                effective_joint_max_delta = 10.0  # Bypass clipping
+                effective_alpha = 1.0             # Bypass exponential lag
+            else:
+                effective_joint_max_delta = joint_max_delta
+                effective_alpha = self.joint_smoothing_alpha
+
             self.cmd_arm[side] = self._smooth_vector(
-                self.cmd_arm[side], desired_arm, self.joint_smoothing_alpha, joint_max_delta
+                self.cmd_arm[side], desired_arm, effective_alpha, effective_joint_max_delta
             )
             self.cmd_gripper[side] = self._smooth_scalar(
                 self.cmd_gripper[side], desired_gripper, self.gripper_smoothing_alpha, gripper_max_delta

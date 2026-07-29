@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { Camera, Eye, Maximize2, Minimize2, X } from 'lucide-react';
 import { useApi } from '@/contexts/ApiContext';
 
 interface RecordingCameraPreviewProps {
@@ -9,6 +9,7 @@ interface RecordingCameraPreviewProps {
 export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ cameras }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showCameraViewer, setShowCameraViewer] = useState(false);
   // Name of the camera currently enlarged inline, or null for the normal grid.
   const [expandedCam, setExpandedCam] = useState<string | null>(null);
   const [systemDevices, setSystemDevices] = useState<{id: string, name: string}[]>([]);
@@ -55,13 +56,27 @@ export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ 
     <div className="flex flex-col gap-2">
       <div className="flex justify-between items-center">
         <h3 className="text-sm font-semibold text-gray-300">Camera Feeds</h3>
-        <button
-          onClick={handleRefresh}
-          disabled={isRefreshing}
-          className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1 rounded transition-colors disabled:opacity-50"
-        >
-          {isRefreshing ? 'Reconnecting...' : 'Reconnect Cameras'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const query = new URLSearchParams({ cameras: cameras.join(",") }).toString();
+              window.open(`/recording-cameras?${query}`, "_blank");
+            }}
+            className="inline-flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1 rounded transition-colors"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            Enlarge All Cameras
+          </button>
+          <button
+            type="button"
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1 rounded transition-colors disabled:opacity-50"
+          >
+            {isRefreshing ? 'Reconnecting...' : 'Reconnect Cameras'}
+          </button>
+        </div>
       </div>
 
       {expandedCam ? (
@@ -108,7 +123,7 @@ interface CameraFeedProps {
   systemDevices?: {id: string, name: string}[];
 }
 
-const CameraFeed: React.FC<CameraFeedProps> = ({ name, expanded = false, onToggleExpand, systemDevices = [] }) => {
+export const CameraFeed: React.FC<CameraFeedProps> = ({ name, expanded = false, onToggleExpand, systemDevices = [] }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [imgSrc, setImgSrc] = useState<string | null>(null);
   const [isFrozen, setIsFrozen] = useState(false);

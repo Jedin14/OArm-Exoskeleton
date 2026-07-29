@@ -46,9 +46,12 @@ const Landing = () => {
   const [numEpisodes, setNumEpisodes] = useState(5);
   const [episodeTimeS, setEpisodeTimeS] = useState(60);
   const [resetTimeS, setResetTimeS] = useState(15);
-  const [streamingEncoding, setStreamingEncoding] = useState(true);
+  // Capture first and encode after each episode. Real-time encoding can
+  // backpressure the 30 FPS camera/action loop and create choppy datasets.
+  const [streamingEncoding, setStreamingEncoding] = useState(false);
   const [datasetVersion, setDatasetVersion] = useState("v3.0");
   const [armMode, setArmMode] = useState("both");
+  const [homePositionId, setHomePositionId] = useState("");
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
 
   const releaseStreamsRef = useRef<(() => void) | null>(null);
@@ -149,7 +152,7 @@ const Landing = () => {
     }
   };
 
-  const handleTrainingClick = () => navigate("/training");
+  const handleTrainingClick = () => navigate("/camera-setup");
 
   const openHubViewer = (repoId: string, isPrivate: boolean) => {
     const spacePath = `/spaces/lerobot/visualize_dataset?path=${encodeURIComponent(`/${repoId}`)}`;
@@ -305,6 +308,8 @@ const Landing = () => {
       streaming_encoding: streamingEncoding,
       dataset_version: datasetVersion,
       arm_mode: armMode,
+      home_position_id: homePositionId,
+      robot_name: robot.name,
       cameras: cameraDict,
     };
 
@@ -341,7 +346,7 @@ const Landing = () => {
             createRobot={createRobot}
             deleteRobot={deleteRobot}
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
               <h3 className="font-semibold text-2xl text-left h-12 flex items-center">
                 Dataset
@@ -367,15 +372,28 @@ const Landing = () => {
                 </Button>
               </DatasetPicker>
             </div>
+            
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
               <h3 className="font-semibold text-2xl text-left h-12 flex items-center">
-                Create a model
+                Home Positions
+              </h3>
+              <Button
+                onClick={() => navigate("/arm-positions")}
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white text-lg py-6 shadow-md shadow-blue-500/20"
+              >
+                Manage Arm Poses
+              </Button>
+            </div>
+
+            <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 flex flex-col gap-2">
+              <h3 className="font-semibold text-2xl text-left h-12 flex items-center">
+                Camera Setup
               </h3>
               <Button
                 onClick={handleTrainingClick}
-                className="w-full bg-green-500 hover:bg-green-600 text-white text-lg py-6"
+                className="w-full bg-cyan-600 hover:bg-cyan-500 text-white text-lg py-6 shadow-md shadow-cyan-500/20"
               >
-                Training (Experimental state)
+                Configure ROS Cameras
               </Button>
             </div>
           </div>
@@ -423,6 +441,8 @@ const Landing = () => {
         previousCameraNames={resumeCameraNames}
         armMode={armMode}
         setArmMode={setArmMode}
+        homePositionId={homePositionId}
+        setHomePositionId={setHomePositionId}
       />
     </div>
   );

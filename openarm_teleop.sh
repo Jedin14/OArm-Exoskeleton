@@ -532,6 +532,10 @@ if [[ "$LAUNCH_LELAB" == "true" ]]; then
     launch_step ros2_lelab_bridge \
         /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/ros2_lelab_bridge.py"
         
+    log "Starting ROS 2 Camera Bridge ..."
+    launch_step ros2_camera_bridge \
+        /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/openarm_camera_bridge_node.py"
+
     log "Starting leLab web UI on port $LELAB_PORT ..."
     PORT="$LELAB_PORT" launch_step lelab "$LELAB_VENV"
 fi

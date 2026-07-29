@@ -453,3 +453,105 @@ def is_robot_record_clean(record: dict) -> bool:
     leader_path = os.path.join(LEADER_CONFIG_PATH, record["leader_config"])
     follower_path = os.path.join(FOLLOWER_CONFIG_PATH, record["follower_config"])
     return os.path.exists(leader_path) and os.path.exists(follower_path)
+
+# ---------------------------------------------------------------------------
+# Arm Position Management
+# ---------------------------------------------------------------------------
+
+import uuid
+from datetime import datetime, timezone
+
+def _positions_path(robot_name: str) -> str:
+    return os.path.join(ROBOTS_PATH, f"{robot_name}_positions.json")
+
+def get_arm_positions(robot_name: str) -> list[dict]:
+    """Return all saved arm positions for a given robot."""
+    path = _positions_path(robot_name)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+            return data.get("positions", [])
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"Failed to read arm positions for {robot_name}: {e}")
+        return []
+
+def _save_arm_positions(robot_name: str, positions: list[dict]):
+    path = _positions_path(robot_name)
+    _atomic_write_text(path, json.dumps({"positions": positions}, indent=2))
+
+def ensure_default_position(robot_name: str):
+    """Ensure a default position exists (all zeros) for the robot."""
+    positions = get_arm_positions(robot_name)
+    has_default = any(p.get("is_default") for p in positions)
+    
+    modified = False
+    if not has_default:
+        # 16-element zero array: 7 left arm + 1 left gripper + 7 right arm + 1 right gripper
+        zeros = [0.0] * 16
+        default_pos = {
+            "id": "default",
+            "name": "Default Position",
+            "joint_values": zeros,
+            "is_default": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        positions.insert(0, default_pos)
+        modified = True
+
+    has_ready = any(p.get("name") == "Ready to Pick" for p in positions)
+    if not has_ready:
+        ready_pos = {
+            "id": "ready_pick",
+            "name": "Ready to Pick",
+            "joint_values": [
+                0.436332312999, 0.0, 0.0, 2.007128639793, 0.0, 0.0, 0.0, 0.0,  # Left + Gripper
+                -0.436332312999, 0.0, 0.0, 2.007128639793, 0.0, 0.0, 0.0, 0.0  # Right + Gripper
+            ],
+            "is_default": False,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        # Insert after default if it exists
+        positions.insert(1, ready_pos)
+        modified = True
+        
+    if modified:
+        _save_arm_positions(robot_name, positions)
+
+def save_arm_position(robot_name: str, name: str, joint_values: list[float], pos_id: str | None = None) -> dict:
+    """Create or update a position. If pos_id is provided, updates existing (except default status)."""
+    positions = get_arm_positions(robot_name)
+    
+    if pos_id:
+        for p in positions:
+            if p["id"] == pos_id:
+                p["name"] = name
+                p["joint_values"] = joint_values
+                _save_arm_positions(robot_name, positions)
+                return p
+        raise ValueError(f"Position {pos_id} not found")
+        
+    new_pos = {
+        "id": str(uuid.uuid4())[:8],
+        "name": name,
+        "joint_values": joint_values,
+        "is_default": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    positions.append(new_pos)
+    _save_arm_positions(robot_name, positions)
+    return new_pos
+
+def delete_arm_position(robot_name: str, pos_id: str) -> bool:
+    """Delete a position by ID. Cannot delete default position."""
+    positions = get_arm_positions(robot_name)
+    for i, p in enumerate(positions):
+        if p["id"] == pos_id:
+            if p.get("is_default"):
+                raise ValueError("Cannot delete the default position")
+            positions.pop(i)
+            _save_arm_positions(robot_name, positions)
+            return True
+    return False
+

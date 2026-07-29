@@ -70,6 +70,7 @@ class OpenArmRosRobotConfig(RobotConfig):
     type: str = "openarm_ros"
     cameras: dict = field(default_factory=dict)
     arm_mode: str = "both"  # "left", "right", or "both"
+    ros_camera_names: list = field(default_factory=list)
     
     # We define joints depending on the arm mode
     @property
@@ -136,6 +137,12 @@ class OpenArmRosRobot(Robot):
         self._camera_last_recover_attempt = {}
         self._camera_stale_recover_s = 1.5   # freeze this long -> try recovery
         self._camera_recover_backoff_s = 2.0  # min gap between attempts
+        self._ros_camera_names: list[str] = list(config.ros_camera_names)
+        for cam in self._ros_camera_names:
+            self._camera_frozen[cam] = True
+            import numpy as np
+            self._latest_obs[cam] = np.zeros((480, 640, 3), dtype=np.uint8)
+
         self._watchdog_stop_event = threading.Event()
         self._watchdog_thread = None
 
@@ -166,8 +173,11 @@ class OpenArmRosRobot(Robot):
             features["gripper_state_1.pos"] = float
             
         # Add cameras
+        for cam_name in getattr(self, "_ros_camera_names", []):
+            features[cam_name] = (480, 640, 3)
         for cam_key, cam in self.cameras.items():
-            features[cam_key] = (cam.config.height, cam.config.width, 3)
+            if cam_key not in features:
+                features[cam_key] = (cam.config.height, cam.config.width, 3)
         return features
 
     @cached_property
@@ -228,6 +238,30 @@ class OpenArmRosRobot(Robot):
                             (received_at, self._latest_action.copy(), self._action_timestamps.copy())
                         )
 
+                    # Decode camera frames delivered via /dev/shm by the ROS bridge
+                    for cam_name, cam_data in payload.get("cameras", {}).items():
+                        try:
+                            frame_ts = float(cam_data["timestamp"])
+                            
+                            import os
+                            shm_path = f"/dev/shm/lelab_cameras/{cam_name}.jpg"
+                            if not os.path.exists(shm_path):
+                                continue
+                                
+                            with open(shm_path, "rb") as f:
+                                jpeg_bytes = f.read()
+                                
+                            import cv2 as _cv2
+                            arr = _cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), _cv2.IMREAD_COLOR)
+                            if arr is not None:
+                                frame_rgb = _cv2.cvtColor(arr, _cv2.COLOR_BGR2RGB)
+                                self._latest_obs[cam_name] = frame_rgb
+                                self._last_sync_diagnostics[f"camera.{cam_name}.timestamp"] = received_at
+                                with self._frames_lock:
+                                    self._latest_frames[cam_name] = jpeg_bytes
+                        except Exception as _e:
+                            logger.debug(f"Camera decode error for {cam_name}: {_e}")
+
                     if "buttons" in payload:
                         self._latest_buttons = payload["buttons"]
 
@@ -235,6 +269,15 @@ class OpenArmRosRobot(Robot):
                 pass
             except Exception as e:
                 logger.debug(f"UDP read error: {e}")
+
+            # Continuously monitor ROS cameras for freeze timeouts independent of get_observation
+            now = time.monotonic()
+            for cam_name in self._ros_camera_names:
+                last_ts = self._last_sync_diagnostics.get(f"camera.{cam_name}.timestamp", 0.0)
+                if last_ts == 0.0 or now - last_ts > 1.0:
+                    self._camera_frozen[cam_name] = True
+                else:
+                    self._camera_frozen[cam_name] = False
 
     @check_if_already_connected
     def connect(self, calibrate: bool = False) -> None:
@@ -364,48 +407,65 @@ class OpenArmRosRobot(Robot):
     @check_if_not_connected
     def get_observation(self):
         obs = self._latest_obs.copy()
+        # All software timestamps used for pairing are on the host's
+        # monotonic clock.  Do not use the time at which the recorder happens
+        # to inspect a frame: camera backends keep the capture/read timestamp
+        # of the frame in ``latest_timestamp``.
         sync_timestamp = time.monotonic()
         
-        # Capture images from cameras and store latest frames for preview
-        for cam_key, cam in self.cameras.items():
-            frame_timestamp = self._last_sync_diagnostics.get(
-                f"camera.{cam_key}.timestamp", time.monotonic()
-            )
-            try:
-                # Newer LeRobot camera backends expose async_read(); older
-                # local builds expose read_latest().  In either case record
-                # the local monotonic acquisition time for synchronization.
-                if hasattr(cam, "read_latest"):
-                    frame = cam.read_latest(max_age_ms=2000)
-                else:
-                    frame = cam.async_read(timeout_ms=2000)
-                frame_timestamp = time.monotonic()
-                self._camera_frozen[cam_key] = False
-                self._camera_last_good[cam_key] = time.monotonic()
-            except (TimeoutError, RuntimeError) as e:
-                logger.warning(f"Failed to read from {cam_key}, reusing previous frame. Error: {e}")
-                self._camera_frozen[cam_key] = True
-                frame = self._latest_obs.get(cam_key, None)
-                if frame is None:
-                    # If we don't even have a first frame, we have to crash
-                    raise
-            
-            obs[cam_key] = frame
-            self._latest_obs[cam_key] = frame
-            self._last_sync_diagnostics[f"camera.{cam_key}.timestamp"] = frame_timestamp
-            
-            # Encode frame as JPEG for the web preview endpoint
-            if frame is not None:
-                try:
-                    import cv2
-                    # LeRobot cameras output RGB, but cv2.imencode expects BGR.
-                    if isinstance(frame, np.ndarray):
-                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                        _, jpeg_buf = cv2.imencode('.jpg', frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                        with self._frames_lock:
-                            self._latest_frames[cam_key] = jpeg_buf.tobytes()
-                except Exception as e:
-                    logger.debug(f"Failed to encode frame for {cam_key}: {e}")
+        if self._ros_camera_names:
+            # ROS mode: frames already decoded and stored in _latest_obs by UDP thread
+            for cam_name in self._ros_camera_names:
+                if cam_name in self._latest_obs and isinstance(self._latest_obs[cam_name], np.ndarray):
+                    obs[cam_name] = self._latest_obs[cam_name]
+        else:
+            with self._camera_lock:
+                # Append USB camera frames to the observation dict
+                for cam_key, cam in self.cameras.items():
+                    try:
+                        frame_timestamp = self._last_sync_diagnostics.get(
+                            f"camera.{cam_key}.timestamp", time.monotonic()
+                        )
+                        if self._camera_frozen.get(cam_key, False):
+                            logger.debug(f"Skipping read for frozen camera {cam_key}")
+                            frame = self._latest_obs.get(cam_key, None)
+                            if frame is None:
+                                raise RuntimeError("No initial frame exists for frozen camera")
+                        else:
+                            # Newer LeRobot camera backends expose async_read(); older
+                            # local builds expose read_latest().  In either case record
+                            # the local monotonic acquisition time for synchronization.
+                            if hasattr(cam, "read_latest"):
+                                frame = cam.read_latest(max_age_ms=2000)
+                            else:
+                                frame = cam.async_read(timeout_ms=2000)
+                        frame_timestamp = time.monotonic()
+                        self._camera_frozen[cam_key] = False
+                        self._camera_last_good[cam_key] = time.monotonic()
+                    except (TimeoutError, RuntimeError) as e:
+                        logger.warning(f"Failed to read from {cam_key}, reusing previous frame. Error: {e}")
+                        self._camera_frozen[cam_key] = True
+                        frame = self._latest_obs.get(cam_key, None)
+                        if frame is None:
+                            # If we don't even have a first frame, we have to crash
+                            raise
+                    
+                    obs[cam_key] = frame
+                    self._latest_obs[cam_key] = frame
+                    self._last_sync_diagnostics[f"camera.{cam_key}.timestamp"] = frame_timestamp
+                    
+                    # Encode frame as JPEG for the web preview endpoint
+                    if frame is not None:
+                        try:
+                            import cv2
+                            # LeRobot cameras output RGB, but cv2.imencode expects BGR.
+                            if isinstance(frame, np.ndarray):
+                                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                                _, jpeg_buf = cv2.imencode('.jpg', frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                                with self._frames_lock:
+                                    self._latest_frames[cam_key] = jpeg_buf.tobytes()
+                        except Exception as e:
+                            logger.debug(f"Failed to encode frame for {cam_key}: {e}")
             
         with self._data_lock:
             # Use one common target after all modalities have been acquired.
@@ -449,10 +509,11 @@ class OpenArmRosRobot(Robot):
         return positions
 
     def get_action_at_sync_time(self) -> dict[str, float]:
-        """Return the action that existed at the observation row timestamp.
+        """Return the timestamp-nearest action for the observation row.
 
-        Per-joint timestamps prevent a newly arrived command for one arm from
-        being paired with an observation that predates that command.
+        Per-joint timestamps prevent one arm's newly arrived command from being
+        paired with another arm's older command. Nearest-sample selection keeps
+        action/camera timing error bounded in the 30 Hz recorder.
         """
         with self._data_lock:
             target = self._last_sync_timestamp or time.monotonic()
@@ -461,20 +522,22 @@ class OpenArmRosRobot(Robot):
             for _received_at, values, timestamps in self._action_history:
                 for key, value in values.items():
                     ts = timestamps.get(key, _received_at)
-                    if ts <= target and ts >= selected_ts.get(key, float("-inf")):
+                    if key not in selected_ts or abs(ts - target) < abs(selected_ts[key] - target):
                         selected[key] = value
                         selected_ts[key] = ts
             if not selected:
                 selected = self._latest_action.copy()
             self._last_sync_diagnostics["action.timestamp"] = max(selected_ts.values(), default=0.0)
             self._last_sync_diagnostics["action_age_ms"] = (
-                max(0.0, target - max(selected_ts.values())) * 1000.0
+                min(abs(target - ts) for ts in selected_ts.values()) * 1000.0
                 if selected_ts else None
             )
             if selected_ts:
-                self._last_sync_diagnostics["max_action_age_ms"] = max(
-                    max(0.0, target - ts) * 1000.0 for ts in selected_ts.values()
+                self._last_sync_diagnostics["max_action_delta_ms"] = max(
+                    abs(target - ts) * 1000.0 for ts in selected_ts.values()
                 )
+            else:
+                self._last_sync_diagnostics["max_action_delta_ms"] = float("inf")
             return selected
 
     def get_sync_diagnostics(self) -> dict:
@@ -492,6 +555,20 @@ class OpenArmRosRobot(Robot):
             ]
             diagnostics["action.ros_timestamp"] = max(action_ros, default=0.0)
             return diagnostics
+
+    def sync_within_tolerance(self, tolerance_s: float = 0.020) -> bool:
+        """Return whether the current row can safely enter the dataset."""
+        diagnostics = self.get_sync_diagnostics()
+        target = float(diagnostics.get("sync.timestamp", 0.0))
+        if not target:
+            return False
+        state_delta = abs(target - float(diagnostics.get("observation.timestamp", target)))
+        camera_deltas = [
+            abs(target - value) for key, value in diagnostics.items()
+            if key.startswith("camera.") and key.endswith(".timestamp")
+        ]
+        action_delta = float(diagnostics.get("max_action_delta_ms", 0.0)) / 1000.0
+        return max([state_delta, action_delta, *camera_deltas]) <= tolerance_s
 
     @property
     def latest_buttons(self) -> list[int]:

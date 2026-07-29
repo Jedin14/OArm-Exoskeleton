@@ -21,6 +21,7 @@ import { AlertTriangle, CheckCircle, ChevronDown } from "lucide-react";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
+import { useApi } from "@/contexts/ApiContext";
 import { useHfAuth } from "@/contexts/HfAuthContext";
 import { RobotRecord } from "@/hooks/useRobots";
 import {
@@ -60,6 +61,8 @@ interface RecordingModalProps {
   onDeleteTaskOption: (task: string) => void;
   armMode: string;
   setArmMode: (value: string) => void;
+  homePositionId: string;
+  setHomePositionId: (value: string) => void;
 }
 
 const RecordingModal: React.FC<RecordingModalProps> = ({
@@ -91,8 +94,53 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   onDeleteTaskOption,
   armMode,
   setArmMode,
+  homePositionId,
+  setHomePositionId,
 }) => {
   const { auth } = useHfAuth();
+  const { baseUrl, fetchWithHeaders } = useApi();
+  const isRosMode = !!(robot?.follower_port?.includes("openarm_ros") || robot?.follower_port?.includes("ROS2"));
+  const [rosMappings, setRosMappings] = React.useState<Array<{name: string; device_index: number}>>([]);
+  const [positions, setPositions] = React.useState<Array<any>>([]);
+
+  React.useEffect(() => {
+    if (!open || !robot?.name) return;
+    fetchWithHeaders(`${baseUrl}/robots/${robot.name}/positions`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.status === "success") {
+          setPositions(d.positions);
+          if (!homePositionId && d.positions.length > 0) {
+            // Automatically select default position
+            const def = d.positions.find((p: any) => p.is_default);
+            setHomePositionId(def ? def.id : d.positions[0].id);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [open, robot?.name, baseUrl, fetchWithHeaders, homePositionId, setHomePositionId]);
+
+  React.useEffect(() => {
+    if (!open || !isRosMode) return;
+    fetchWithHeaders(`${baseUrl}/ros-camera-mappings`)
+      .then((r) => r.json())
+      .then((d) => {
+        setRosMappings(d.mappings || []);
+        // Automatically populate the cameras state so the Recording page knows which cameras to preview
+        const newCameras: any[] = [];
+        (d.mappings || []).forEach((m: any) => {
+           newCameras.push({ 
+             camera_index: m.device_index, 
+             name: m.name,
+             type: "opencv",
+             width: 640,
+             height: 480
+           });
+        });
+        setCameras(newCameras as any);
+      })
+      .catch(() => {});
+  }, [open, isRosMode, baseUrl, fetchWithHeaders, setCameras]);
 
   const canStart = !!robot && robot.is_clean;
 
@@ -377,17 +425,66 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                     </p>
                   )}
                 </div>
+                
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium text-gray-300">
+                    Home Position (Reset Target)
+                  </Label>
+                  <Select value={homePositionId} onValueChange={setHomePositionId}>
+                    <SelectTrigger className="bg-gray-800 border-gray-700 text-white w-full">
+                      <SelectValue placeholder="Select home position" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-gray-800 border-gray-700">
+                      {positions.map((p) => (
+                        <SelectItem key={p.id} value={p.id} className="text-white hover:bg-gray-700">
+                          {p.name} {p.is_default ? "(Default)" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-gray-500">
+                    The arms will slowly return to this position between episodes.
+                  </p>
+                </div>
               </div>
             </div>
 
             <div className="space-y-4">
-              <CameraConfiguration
-                cameras={cameras}
-                onCamerasChange={setCameras}
-                releaseStreamsRef={releaseStreamsRef}
-                suggestedCameraNames={isResume ? previousCameraNames : []}
-                locked={isResume}
-              />
+              {isRosMode ? (
+                <div className="space-y-3">
+                  <h3 className="text-lg font-semibold text-white border-b border-gray-700 pb-2 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                    ROS Cameras
+                  </h3>
+                  {rosMappings.length === 0 ? (
+                    <div className="bg-amber-950/30 border border-amber-800/50 rounded-lg px-4 py-3 text-sm text-amber-300">
+                      ⚠️ No ROS cameras attached. Visit Camera Setup to attach cameras before recording.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {rosMappings.map((m) => (
+                        <div key={m.name} className="flex items-center gap-3 bg-gray-800/60 border border-gray-700 rounded-lg px-3 py-2 text-sm">
+                          <span className="w-2 h-2 rounded-full bg-cyan-400 flex-shrink-0" />
+                          <span className="font-medium text-white">{m.name}</span>
+                          <span className="text-xs text-gray-500 font-mono ml-auto">/dev/video{m.device_index}</span>
+                          <span className="text-xs text-cyan-400 font-mono">ROS ✓</span>
+                        </div>
+                      ))}
+                      <p className="text-xs text-gray-500">
+                        Cameras are pre-configured via ROS topics — no additional setup needed.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <CameraConfiguration
+                  cameras={cameras}
+                  onCamerasChange={setCameras}
+                  releaseStreamsRef={releaseStreamsRef}
+                  suggestedCameraNames={isResume ? previousCameraNames : []}
+                  locked={isResume}
+                />
+              )}
             </div>
 
             <Collapsible className="space-y-4 group">
@@ -414,8 +511,9 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                     </Label>
                     <p className="text-xs text-gray-500">
                       Encodes frames in real time during capture so each
-                      episode saves almost instantly. Uncheck to fall back to
-                      the slower PNG-then-encode flow.
+                      episode saves almost instantly, but may reduce capture
+                      smoothness. For reliable 30 FPS VLA data, leave this
+                      disabled so frames are encoded after capture.
                     </p>
                   </div>
                 </div>

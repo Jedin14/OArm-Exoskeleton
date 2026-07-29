@@ -16,7 +16,7 @@ BeastVLA_v3_demo
 
 pick packet and place it in box
 
-
+main_camera
 left_camera
 right_camera
 
@@ -25,3 +25,6 @@ Pick up the bottle and place it in the box
 
 Beast_Bottle_Demo
 pick up the bottle and place it in the container
+
+
+pick the packet and drop it in the box

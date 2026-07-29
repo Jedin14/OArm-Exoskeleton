@@ -19,10 +19,13 @@ import socket
 import threading
 import time
 
+import base64
+from pathlib import Path
+
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import JointState, Joy
+from sensor_msgs.msg import JointState, Joy, CompressedImage
 
 import tf2_ros
 from tf2_ros import TransformListener, Buffer
@@ -80,6 +83,10 @@ class LeLabBridgeNode(Node):
         self.latest_buttons  = []
         self.lock            = threading.Lock()
 
+        # Camera state: name -> {"data": base64_str, "timestamp": float}
+        self.latest_cameras: dict[str, dict] = {}
+        self._subscribe_cameras()
+
         # ------------------------------------------------------------------ #
         # TF2 buffer / listener
         # ------------------------------------------------------------------ #
@@ -111,6 +118,33 @@ class LeLabBridgeNode(Node):
     # ---------------------------------------------------------------------- #
     # Callbacks
     # ---------------------------------------------------------------------- #
+
+    def _subscribe_cameras(self):
+        import os
+        map_path = Path(os.path.expanduser("~/.config/lelab/ros_camera_mappings.json"))
+        if not map_path.is_file():
+            self.get_logger().info("No ros_camera_mappings.json found, skipping cameras.")
+            return
+
+        with open(map_path, "r") as f:
+            mappings = json.load(f)
+
+        os.makedirs("/dev/shm/lelab_cameras", exist_ok=True)
+
+        def make_cb(name):
+            def cb(msg):
+                ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+                # Write JPEG directly to RAM disk
+                with open(f"/dev/shm/lelab_cameras/{name}.jpg", "wb") as f:
+                    f.write(bytes(msg.data))
+                self.latest_cameras[name] = {"timestamp": ts}
+            return cb
+
+        for cam in mappings:
+            name = cam["name"]
+            topic = f"/camera/{name}/image_raw/compressed"
+            self.create_subscription(CompressedImage, topic, make_cb(name), 10)
+            self.get_logger().info(f"Subscribed to camera topic: {topic}")
 
     def obs_callback(self, msg: JointState):
         """Store position & velocity for every recognised openarm joint."""
@@ -206,6 +240,7 @@ class LeLabBridgeNode(Node):
             observation_timestamp = self.latest_observation_timestamp
             observation_ros_timestamp = self.latest_observation_ros_timestamp
             buttons_snapshot = self.latest_buttons.copy()
+            cameras_snapshot = {k: dict(v) for k, v in self.latest_cameras.items()}
 
         # --- ee_pose [14] (TF lookup outside the main lock to avoid blocking) ---
         left_ee  = self._lookup_ee_pose(LEFT_EE_FRAME)  or [0.0] * 7
@@ -228,6 +263,7 @@ class LeLabBridgeNode(Node):
             "action_ros_timestamps": action_ros_timestamps,
             "bridge_timestamp": time.monotonic(),
             "buttons":     buttons_snapshot,
+            "cameras":     cameras_snapshot,
             "timestamp":   time.time(),
         }
 

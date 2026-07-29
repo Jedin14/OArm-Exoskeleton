@@ -114,3 +114,7 @@ You can adjust the following parameters inside the `teleop_sim_full.launch.py` o
 [8:16] = right joint positions (radians)
 [16:30] = ee_pose: [left_x, y, z, qx, qy, qz, qw, right_x, y, z, qx, qy, qz, qw]
 [30:32] = gripper_state: [left_finger, right_finger]
+
+
+python3 lelab_ui/lelab/scripts/visualize_sync.py \
+/home/jed/.cache/huggingface/lerobot/JedEYE14/packet_v2.1_20260727_145038

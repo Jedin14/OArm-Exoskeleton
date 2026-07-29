@@ -751,6 +751,32 @@ def toggle_right_arm_home(req: ToggleArmHomeRequest):
     subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
     return {"success": True}
 
+@app.post("/trigger-home-now")
+def trigger_home_now():
+    """Trigger homing to the dataset's selected home position, or default 0.0 if none."""
+    import subprocess
+    import json
+    import os
+    from lelab.record import recording_events
+    
+    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+    
+    set_home = None
+    if recording_events is not None:
+        target_state = recording_events.get("target_home_state")
+        if target_state is not None:
+            if len(target_state) == 16:
+                set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[8:15], "right_gripper": target_state[15], "lock_all": True}
+            elif len(target_state) == 8:
+                set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7], "lock_all": True}
+    
+    if set_home:
+        subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
+    else:
+        subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "home_all"})])
+        
+    return {"success": True}
+
 class PersistentLockRequest(BaseModel):
     arm: str
     locked: bool
@@ -1720,6 +1746,131 @@ def _avfoundation_cameras_in_cv2_order() -> list[dict[str, Any]]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# ROS Camera Mappings + Bridge Control
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess
+
+_ROS_CAMERA_MAPPINGS_PATH = Path.home() / ".config" / "lelab" / "ros_camera_mappings.json"
+_bridge_proc: _subprocess.Popen | None = None
+_bridge_proc_lock = threading.Lock()
+
+
+class RosCameraMappingEntry(BaseModel):
+    name: str  # "main_camera", "right_camera", or "left_camera"
+    device_index: int
+    width: int = 640
+    height: int = 480
+    fps: int = 30
+
+
+def _load_ros_camera_mappings() -> list[dict]:
+    if not _ROS_CAMERA_MAPPINGS_PATH.is_file():
+        return []
+    try:
+        return json.loads(_ROS_CAMERA_MAPPINGS_PATH.read_text())
+    except Exception:
+        return []
+
+
+def _save_ros_camera_mappings(mappings: list[dict]) -> None:
+    _ROS_CAMERA_MAPPINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ROS_CAMERA_MAPPINGS_PATH.write_text(json.dumps(mappings, indent=2))
+
+
+@app.get("/ros-camera-mappings")
+def get_ros_camera_mappings():
+    """Return the persisted ROS camera→USB device mappings."""
+    return {"mappings": _load_ros_camera_mappings()}
+
+
+@app.post("/ros-camera-mappings")
+def add_ros_camera_mapping(entry: RosCameraMappingEntry):
+    """Add or update a camera mapping and persist it."""
+    VALID_NAMES = {"main_camera", "right_camera", "left_camera"}
+    if entry.name not in VALID_NAMES:
+        raise HTTPException(status_code=400, detail=f"name must be one of {VALID_NAMES}")
+    mappings = _load_ros_camera_mappings()
+    # Replace if name already exists
+    mappings = [m for m in mappings if m["name"] != entry.name]
+    mappings.append(entry.model_dump())
+    _save_ros_camera_mappings(mappings)
+    return {"success": True, "mappings": mappings}
+
+
+@app.delete("/ros-camera-mappings/{name}")
+def delete_ros_camera_mapping(name: str):
+    """Remove one camera mapping by name."""
+    mappings = _load_ros_camera_mappings()
+    mappings = [m for m in mappings if m["name"] != name]
+    _save_ros_camera_mappings(mappings)
+    return {"success": True, "mappings": mappings}
+
+
+@app.get("/ros-camera-status")
+def get_ros_camera_status():
+    """Return per-camera live FPS read from the bridge heartbeat file."""
+    status_path = Path("/tmp/lelab_camera_status.json")
+    if not status_path.is_file():
+        return {"status": {}}
+    try:
+        return {"status": json.loads(status_path.read_text())}
+    except Exception:
+        return {"status": {}}
+
+
+@app.post("/ros-camera-bridge/start")
+def start_ros_camera_bridge():
+    """Launch the openarm_camera_bridge_node.py ROS 2 node as a subprocess.
+    Kills any existing instances first (e.g., those spawned by the bash script)."""
+    global _bridge_proc
+    with _bridge_proc_lock:
+        # Kill any existing bridge processes to avoid camera locks and JSON conflicts
+        _subprocess.run(["pkill", "-f", "openarm_camera_bridge_node.py"])
+        import time
+        time.sleep(0.2)
+        
+        bridge_script = Path(__file__).parent.parent.parent / "src" / "qnbot_teleoperator" / "scripts" / "openarm_camera_bridge_node.py"
+        if not bridge_script.is_file():
+            raise HTTPException(status_code=404, detail=f"Bridge script not found: {bridge_script}")
+            
+        _bridge_proc = _subprocess.Popen(
+            ["/usr/bin/python3", str(bridge_script)],
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.STDOUT,
+        )
+        logger.info(f"ROS camera bridge started (PID {_bridge_proc.pid})")
+        return {"success": True, "pid": _bridge_proc.pid}
+
+
+@app.post("/ros-camera-bridge/stop")
+def stop_ros_camera_bridge():
+    """Stop the running camera bridge subprocess, including bash-spawned ones."""
+    global _bridge_proc
+    with _bridge_proc_lock:
+        _subprocess.run(["pkill", "-f", "openarm_camera_bridge_node.py"])
+        _bridge_proc = None
+        logger.info("ROS camera bridge stopped via pkill")
+        return {"success": True, "message": "Bridge stopped"}
+
+
+@app.get("/ros-camera-bridge/status")
+def get_ros_camera_bridge_status():
+    """Return running state and PID of the camera bridge, detecting bash-spawned instances."""
+    global _bridge_proc
+    with _bridge_proc_lock:
+        try:
+            out = _subprocess.check_output(["pgrep", "-f", "openarm_camera_bridge_node.py"]).decode().strip().split("\n")
+            pid = int(out[0]) if out and out[0] else None
+        except (_subprocess.CalledProcessError, ValueError):
+            pid = None
+            
+        if pid is not None:
+            return {"running": True, "pid": pid}
+        return {"running": False, "pid": None}
+
+
 @app.get("/available-cameras")
 def get_available_cameras():
     """List cameras with the same index ordering cv2 will use to record.
@@ -2015,6 +2166,139 @@ def delete_robot(name: str):
     return JSONResponse(status_code=404, content={"status": "error", "message": "Robot not found"})
 
 
+# ---------------------------------------------------------------------------
+# Arm Positions Management
+# ---------------------------------------------------------------------------
+
+from .utils.config import (
+    get_arm_positions,
+    save_arm_position,
+    delete_arm_position,
+    ensure_default_position
+)
+
+class ArmPositionRequest(BaseModel):
+    name: str
+    joint_values: list[float]
+
+@app.get("/robots/{name}/positions")
+def list_positions(name: str):
+    if not is_valid_robot_name(name):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
+    ensure_default_position(name)
+    positions = get_arm_positions(name)
+    return {"status": "success", "positions": positions}
+
+@app.post("/robots/{name}/positions")
+def add_position(name: str, request: ArmPositionRequest):
+    if not is_valid_robot_name(name):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
+    ensure_default_position(name)
+    try:
+        new_pos = save_arm_position(name, request.name, request.joint_values)
+        return {"status": "success", "position": new_pos}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+@app.put("/robots/{name}/positions/{pos_id}")
+def update_position(name: str, pos_id: str, request: ArmPositionRequest):
+    if not is_valid_robot_name(name):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
+    try:
+        updated_pos = save_arm_position(name, request.name, request.joint_values, pos_id=pos_id)
+        return {"status": "success", "position": updated_pos}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+
+@app.delete("/robots/{name}/positions/{pos_id}")
+def remove_position(name: str, pos_id: str):
+    if not is_valid_robot_name(name):
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid robot name"})
+    try:
+        success = delete_arm_position(name, pos_id)
+        if success:
+            return {"status": "success"}
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Position not found"})
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+
+@app.post("/robots/{name}/positions/{pos_id}/move-to")
+def move_to_position(name: str, pos_id: str):
+    import subprocess
+    import json
+    
+    positions = get_arm_positions(name)
+    target_pos = next((p for p in positions if p["id"] == pos_id), None)
+    if not target_pos:
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Position not found"})
+    
+    joint_values = target_pos["joint_values"]
+    if len(joint_values) < 16:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid joint values length"})
+        
+    set_home = {
+        "action": "set_home_target", 
+        "left_arm": joint_values[0:7], 
+        "left_gripper": joint_values[7], 
+        "right_arm": joint_values[8:15], 
+        "right_gripper": joint_values[15]
+    }
+    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+    subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
+    subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "home_all"})])
+    
+    return {"status": "success"}
+
+@app.post("/robots/{name}/positions/set-target")
+def set_live_target(name: str, request: ArmPositionRequest):
+    import subprocess
+    import json
+    
+    joint_values = request.joint_values
+    if len(joint_values) < 16:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid joint values length"})
+        
+    set_home = {
+        "action": "set_home_target", 
+        "left_arm": joint_values[0:7], 
+        "left_gripper": joint_values[7], 
+        "right_arm": joint_values[8:15], 
+        "right_gripper": joint_values[15]
+    }
+    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+    subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
+    return {"status": "success"}
+
+@app.post("/robots/{name}/positions/capture")
+def capture_position(name: str):
+    import socket
+    import json
+    # Try to listen for one packet from the ROS UDP publisher to get current joint positions
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        sock.bind(("127.0.0.1", 19092))
+        sock.settimeout(1.0)
+        
+        data, _ = sock.recvfrom(65535)
+        payload = json.loads(data.decode('utf-8'))
+        obs_payload = payload.get("observation", {})
+        jp = obs_payload.get("joint_position", [])
+        
+        sock.close()
+        
+        if len(jp) == 16:
+            return {"status": "success", "joint_values": jp}
+        else:
+            return JSONResponse(status_code=500, content={"status": "error", "message": "Did not receive full 16-DOF joint_position array from ROS"})
+            
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"Failed to capture joint positions: {e}"})
+
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when FastAPI shuts down"""
@@ -2026,6 +2310,16 @@ async def shutdown_event():
         manager.stop_broadcast_thread()
     logger.info("✅ Cleanup completed")
 
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def catch_all_for_react(request: Request, exc: StarletteHTTPException):
+    if exc.status_code == 404:
+        # If the browser is asking for HTML, serve the React app
+        if "text/html" in request.headers.get("accept", "") and FRONTEND_DIST.exists():
+            return FileResponse(FRONTEND_DIST / "index.html")
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 # Serve the built frontend at /. Must be mounted last so API routes win.
 if FRONTEND_DIST.exists():

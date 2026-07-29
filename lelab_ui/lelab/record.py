@@ -57,6 +57,55 @@ active_robot = None
 # both pass the active-flag check.
 _state_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Module-level singleton ROS publisher for /exo/ui_command
+# ---------------------------------------------------------------------------
+# Created once on first use, reused for all homing/unlock commands.
+# This avoids the 2-3 second subprocess startup cost every time.
+_ros_ui_cmd_node = None
+_ros_ui_cmd_pub = None
+_ros_ui_cmd_lock = threading.Lock()
+
+def _send_ui_command(cmd_dict: dict) -> bool:
+    """Publish a UI command to /exo/ui_command instantly via in-process ROS publisher.
+    Falls back to subprocess if ROS is not available in this process."""
+    global _ros_ui_cmd_node, _ros_ui_cmd_pub
+    import json
+    cmd_str = json.dumps(cmd_dict)
+    try:
+        import rclpy
+        from std_msgs.msg import String
+        with _ros_ui_cmd_lock:
+            # Initialize rclpy if not already done in this process
+            if not rclpy.ok():
+                try:
+                    rclpy.init()
+                except Exception:
+                    pass  # Already initialized or not available
+            if not rclpy.ok():
+                raise RuntimeError("rclpy not available")
+            if _ros_ui_cmd_pub is None:
+                _ros_ui_cmd_node = rclpy.create_node('lelab_ui_cmd_singleton')
+                _ros_ui_cmd_pub = _ros_ui_cmd_node.create_publisher(String, '/exo/ui_command', 10)
+                time.sleep(0.25)  # one-time discovery wait
+            msg = String()
+            msg.data = cmd_str
+            for _ in range(3):  # publish 3x for reliability
+                _ros_ui_cmd_pub.publish(msg)
+        logger.info(f"_send_ui_command (ROS): {cmd_str}")
+        return True
+    except Exception as e:
+        logger.warning(f"_send_ui_command ROS failed ({e}), falling back to subprocess")
+        # Subprocess fallback — always works but has 2-3s startup cost
+        try:
+            import subprocess, os
+            script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+            subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+            return True
+        except Exception as e2:
+            logger.error(f"_send_ui_command subprocess fallback also failed: {e2}")
+            return False
+
 
 class RecordingRequest(BaseModel):
     leader_port: str
@@ -74,11 +123,17 @@ class RecordingRequest(BaseModel):
     tags: list[str] = []
     private: bool = False
     resume: bool = False
-    streaming_encoding: bool = True
+    # Keep video encoding off the real-time capture path. Streaming H.264 can
+    # backpressure add_frame() and starve the camera/action loop, producing
+    # nominally-30-FPS videos with discontinuous source timestamps.
+    streaming_encoding: bool = False
+    vcodec: str = "auto"
     cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
     dataset_version: str = "v3.0"  # Target version to save dataset in (v2.1 or v3.0)
     arm_mode: str = "both"  # "left", "right", or "both"
+    home_position_id: str | None = None  # ID of the chosen arm position for homing
+    robot_name: str | None = None  # Name of the robot to lookup position
 
 
 class UploadRequest(BaseModel):
@@ -95,17 +150,17 @@ class SetEpisodeTaskRequest(BaseModel):
     task: str
 
 
-def _record_sync_timestamp(robot, events: dict, dataset) -> None:
+def _record_sync_timestamp(robot, events: dict, dataset) -> bool:
     """Record source timing in a sidecar without adding policy inputs."""
     if not hasattr(robot, "get_sync_diagnostics"):
-        return
+        return False
     diagnostics = robot.get_sync_diagnostics()
     state_ts = float(diagnostics.get("observation.timestamp", 0.0))
     action_ts = float(diagnostics.get("action.timestamp", 0.0))
     camera_ts = float(diagnostics.get("camera.timestamp", 0.0))
     sync_ts = float(diagnostics.get("sync.timestamp", 0.0))
     if not state_ts and not action_ts and not camera_ts:
-        return
+        return False
 
     episode_index = getattr(dataset, "num_episodes", None)
     if episode_index is None:
@@ -123,14 +178,24 @@ def _record_sync_timestamp(robot, events: dict, dataset) -> None:
         "state_action_delta": abs(state_ts - action_ts),
         "state_camera_delta": abs(state_ts - camera_ts),
         "action_camera_delta": abs(action_ts - camera_ts),
-        "max_delta": max(abs(state_ts - action_ts), abs(state_ts - camera_ts), abs(action_ts - camera_ts)),
+        "max_delta": max(
+            abs(state_ts - action_ts),
+            abs(state_ts - camera_ts),
+            abs(action_ts - camera_ts),
+            float(diagnostics.get("max_action_delta_ms", 0.0)) / 1000.0,
+        ),
+        "max_action_delta_ms": float(diagnostics.get("max_action_delta_ms", 0.0)),
     }
     for key, value in diagnostics.items():
-        if key.startswith("camera.") and key.endswith(".timestamp"):
+        if key.startswith("camera.") and key.endswith(".timestamp") and key != "camera.timestamp":
             camera_name = key[len("camera.") : -len(".timestamp")]
             row[f"camera_{camera_name}_timestamp"] = float(value)
-    events.setdefault("_sync_rows", []).append(row)
+    # Keep rows private to the current recording attempt. The caller commits
+    # them only after dataset.save_episode() succeeds, so re-recorded attempts
+    # never leak into the sidecar.
+    events.setdefault("_sync_pending_rows", []).append(row)
     events["_sync_frame_index"] = frame_index + 1
+    return True
 
 
 def _write_sync_sidecar(dataset, events: dict) -> None:
@@ -147,6 +212,33 @@ def _write_sync_sidecar(dataset, events: dict) -> None:
         output = pd.concat([pd.read_parquet(path), output], ignore_index=True)
     output.to_parquet(path, index=False)
     logger.info("Wrote synchronization sidecar: %s (%d rows)", path, len(output))
+
+
+def _log_sync_rerun(robot, events: dict) -> None:
+    """Log frame-alignment diagnostics as Rerun scalar plots."""
+    if not hasattr(robot, "get_sync_diagnostics"):
+        return
+    try:
+        import rerun as rr
+
+        diagnostics = robot.get_sync_diagnostics()
+        frame_index = int(events.get("_sync_frame_index", 1)) - 1
+        rr.set_time_sequence("frame", max(frame_index, 0))
+
+        state_ts = float(diagnostics.get("observation.timestamp", 0.0))
+        action_ts = float(diagnostics.get("action.timestamp", 0.0))
+        camera_ts = float(diagnostics.get("camera.timestamp", 0.0))
+        rr.log("sync/delta/state_action_ms", rr.Scalar(abs(state_ts - action_ts) * 1000.0))
+        rr.log("sync/delta/state_camera_ms", rr.Scalar(abs(state_ts - camera_ts) * 1000.0))
+        rr.log("sync/delta/action_camera_ms", rr.Scalar(abs(action_ts - camera_ts) * 1000.0))
+        rr.log(
+            "sync/delta/max_action_ms",
+            rr.Scalar(float(diagnostics.get("max_action_delta_ms", 0.0))),
+        )
+        rr.log("sync/threshold_ms", rr.Scalar(20.0), static=True)
+    except Exception:
+        # Rerun is an optional visualization path and must never affect capture.
+        return
 
 
 def _extract_camera_names_from_features(features: list[str]) -> list[str]:
@@ -433,10 +525,21 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     # Create robot config
     if "openarm_ros" in request.follower_port or "ROS2 (humble)" in request.follower_port:
         from lelab.robots.openarm_ros import OpenArmRosRobotConfig, PassiveROSTeleopConfig
-        # Skip calibration for ROS bridge — it doesn't use lerobot hardware calibration
+        # Load ROS camera names from mappings file (ignoring UI camera selection for ROS mode)
+        import json as _json
+        from pathlib import Path as _Path
+        _mappings_path = _Path.home() / ".config" / "lelab" / "ros_camera_mappings.json"
+        _ros_camera_names = []
+        if _mappings_path.is_file():
+            try:
+                _data = _json.loads(_mappings_path.read_text())
+                _ros_camera_names = [m["name"] for m in _data]
+            except Exception as e:
+                logger.error(f"Failed to read ros_camera_mappings: {e}")
         robot_config = OpenArmRosRobotConfig(
-            cameras=camera_configs,
+            cameras={},  # No hardware camera objects for ROS mode
             arm_mode=request.arm_mode,
+            ros_camera_names=_ros_camera_names,
         )
         # We MUST provide a teleop config for lerobot 1.5.0 recording loop
         teleop_config = PassiveROSTeleopConfig()
@@ -474,6 +577,19 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         private=request.private,
         streaming_encoding=request.streaming_encoding,
     )
+    # LeRobot versions differ on whether vcodec is declared on the config
+    # dataclass. Set it after construction. OpenArm capture must never depend
+    # on a real-time encoder: ``auto`` may select NVENC on hosts where CUDA is
+    # present but incompatible, and encoder backpressure can starve capture.
+    if getattr(robot_config, "type", "") == "openarm_ros":
+        if request.streaming_encoding:
+            logger.warning(
+                "OpenArm recording: disabling streaming video encoding to protect 30 FPS capture"
+            )
+        dataset_config.streaming_encoding = False
+        dataset_config.vcodec = "h264"
+    else:
+        dataset_config.vcodec = request.vcodec
 
     # Create the main record config
     record_config = RecordConfig(
@@ -558,7 +674,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             "persistent_right_lock": global_persistent_locks.get("right", False),
             "target_home_state": None,
             "current_robot_state": None,
+            "_arm_mode": getattr(request, "arm_mode", "both"),  # "left", "right", or "both"
         }
+
+        if request.home_position_id and request.robot_name:
+            from lelab.utils.config import get_arm_positions
+            positions = get_arm_positions(request.robot_name)
+            for p in positions:
+                if p["id"] == request.home_position_id:
+                    recording_events["target_home_state"] = p["joint_values"]
+                    logger.info(f"Loaded custom home position: {p['name']}")
+                    break
 
         record_config = create_record_config(request)
 
@@ -811,6 +937,11 @@ def handle_recording_status() -> dict[str, Any]:
                 if session_ended
                 else "Recording status retrieved successfully"
             )
+        ),
+        "error": (
+            last_recording_info.get("error")
+            if current_phase == "error" and last_recording_info
+            else None
         ),
     }
 
@@ -1095,6 +1226,7 @@ def custom_custom_record_loop(
             dataset.add_frame(frame)
 
         if display_data:
+            _log_sync_rerun(robot, events)
             log_rerun_data(
                 observation=obs_processed, action=action_values, compress_images=display_compressed_images
             )
@@ -1192,21 +1324,17 @@ def custom_record_loop(
         return bool(getattr(robot, "_camera_frozen", None)) and any(robot._camera_frozen.values())
 
     events["_is_homing"] = False
-    
-    # Auto-unlock arms precisely when the recording loop starts (unless manually locked by user)
-    # We ONLY do this during the recording phase (dataset is not None), NOT the resetting phase.
+
+    # Auto-unlock arms based on arm_mode when each recording episode starts.
+    # Uses module-level singleton publisher (_send_ui_command) - instant, no subprocess.
     if dataset is not None:
-        try:
-            import subprocess
-            import os
-            import json
-            script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
-            if not events.get("persistent_left_lock", False):
-                subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "toggle_left_home", "value": False})])
-            if not events.get("persistent_right_lock", False):
-                subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "toggle_right_home", "value": False})])
-        except Exception as e:
-            logger.error(f"Failed to publish auto-unlock commands: {e}")
+        arm_mode = events.get("_arm_mode", "both")
+        unlock_left  = (arm_mode in ("both", "left"))  and not events.get("persistent_left_lock", False)
+        unlock_right = (arm_mode in ("both", "right")) and not events.get("persistent_right_lock", False)
+        if unlock_left:
+            _send_ui_command({"action": "toggle_left_home",  "value": False})
+        if unlock_right:
+            _send_ui_command({"action": "toggle_right_home", "value": False})
 
     while timestamp < control_time_s:
         global recording_active
@@ -1252,30 +1380,19 @@ def custom_record_loop(
                 else:
                     logger.info("Natural episode end approaching. Sending arms home and recording until target reached...")
                 
-                # Send home commands via UI command publisher
+                # Send home command instantly via module-level singleton publisher
                 try:
-                    import subprocess
-                    import os
-                    import json
-                    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
-                    
                     target_state = events.get("target_home_state")
                     if target_state is not None:
                         if len(target_state) == 16:
-                            set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[8:15], "right_gripper": target_state[15]}
+                            set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[8:15], "right_gripper": target_state[15], "lock_all": True}
                         elif len(target_state) == 8:
-                            # Send to both for single arm setups so it catches whichever is active
-                            set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7]}
+                            set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7], "lock_all": True}
                         else:
-                            set_home = None
-                            
-                        if set_home:
-                            subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
-
-                    cmd1 = json.dumps({"action": "toggle_left_home", "value": True})
-                    cmd2 = json.dumps({"action": "toggle_right_home", "value": True})
-                    subprocess.Popen(["/usr/bin/python3", script_path, cmd1])
-                    subprocess.Popen(["/usr/bin/python3", script_path, cmd2])
+                            set_home = {"action": "home_all"}
+                    else:
+                        set_home = {"action": "home_all"}
+                    _send_ui_command(set_home)
                 except Exception as e:
                     logger.error(f"Failed to publish homing command: {e}")
                     
@@ -1305,31 +1422,57 @@ def custom_record_loop(
         # Check if homing is complete
         if events.get("_is_homing", False):
             target_state = events.get("target_home_state")
-            if current_state is not None:
-                
-                if target_state is not None:
-                    # Check if all joints are within tolerance
-                    tolerance = 0.05  # radians (balanced to allow for slight physical steady-state error)
-                    is_home = True
-                    for c, t in zip(current_state, target_state):
-                        if abs(c - t) > tolerance:
-                            is_home = False
-                            break
-                    if is_home:
+            elapsed_homing = timestamp - events.get("_homing_start_time", timestamp)
+            # Always enforce timeout regardless of current_state availability
+            if elapsed_homing > 8.0:
+                logger.warning("Homing timeout reached! Ending episode anyway.")
+                print("\n⚠️ Homing timeout reached! Ending episode.")
+                break
+
+            if current_state is not None and target_state is not None:
+                # Build arm_mode-aware comparison pairs (current_idx, target_idx)
+                arm_mode = events.get("_arm_mode", "both")
+                n_cur = len(current_state)
+                n_tgt = len(target_state)
+
+                if n_tgt == 16 and n_cur <= 8:
+                    # Single-arm current state vs full dual-arm target
+                    if arm_mode == "right":
+                        # current_state[0:7] is right arm → target_state[8:15]
+                        pairs = [(i, 8 + i) for i in range(min(7, n_cur))]
+                    else:
+                        # left arm only: current_state[0:7] → target_state[0:7]
+                        pairs = [(i, i) for i in range(min(7, n_cur))]
+                elif n_tgt == 16 and n_cur >= 14:
+                    # Both arms: skip gripper indices (7 and 15)
+                    pairs = [(i, i) for i in range(min(n_cur, n_tgt)) if i % 8 != 7]
+                elif n_tgt == 8 and n_cur <= 8:
+                    # Single-arm target: direct compare (skip gripper index 7)
+                    pairs = [(i, i) for i in range(min(7, n_cur, n_tgt))]
+                else:
+                    # Fallback: compare as many joints as possible
+                    pairs = [(i, i) for i in range(min(7, n_cur, n_tgt))]
+
+                tolerance = 0.10  # radians
+                is_home = all(abs(current_state[ci] - target_state[ti]) <= tolerance for ci, ti in pairs)
+
+                if is_home:
+                    # Confirm for 0.3s so we don't break on a transient reading
+                    if events.get("_home_confirm_start") is None:
+                        events["_home_confirm_start"] = timestamp
+                    elif timestamp - events["_home_confirm_start"] >= 0.3:
                         logger.info("Arms reached home! Ending episode.")
                         print("\n✅ Arms reached home. Episode complete.")
                         break
-                    # Wait at most 4 seconds for safety to avoid hanging
-                    if timestamp - events.get("_homing_start_time", timestamp) > 4.0:
-                        logger.warning("Homing timeout reached! Ending episode anyway.")
-                        print("\n⚠️ Homing timeout reached! Ending episode.")
-                        break
                 else:
-                    # If we don't have a target state, we can't wait for it! Just wait 2 seconds.
-                    if timestamp - events.get("_homing_start_time", timestamp) > 2.0:
-                        break
+                    events["_home_confirm_start"] = None  # Reset if arm drifts away
+
+            elif current_state is None and elapsed_homing > 2.0:
+                # Robot state unavailable — break after 2s grace period
+                break
 
         # Auto-pause if any camera is frozen, and DO NOT record this tick — the
+
         # frozen camera reuses its last frame, which would pair a stale image
         # with a fresh action and corrupt the dataset. Skipping the write here
         # (in addition to the pause) closes the single-tick window before the
@@ -1341,6 +1484,7 @@ def custom_record_loop(
                 events["pause_recording"] = True
                 events["_freeze_paused"] = True
             # Skip the rest of this iteration so no stale frame is written.
+            time.sleep(control_interval)
             continue
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
@@ -1386,13 +1530,34 @@ def custom_record_loop(
         if not events.get("_is_homing", False):
             _sent_action = robot.send_action(robot_action_to_send)
         else:
-            # During homing, the ROS node takes control of the robot.
-            # We don't send teleop actions to avoid fighting the ROS homing controller.
-            pass
+            # During homing, we let the backend ROS bridge control the arm.
+            # We skip sending teleop actions to prevent fighting the homing trajectory.
+            _sent_action = robot_action_to_send
 
         # Write to dataset
         if dataset is not None:
-            _record_sync_timestamp(robot, events, dataset)
+            sync_row_recorded = True
+            # Bypass sync check if homing, since teleop is disconnected from robot movement
+            if not events.get("_is_homing", False) and hasattr(robot, "sync_within_tolerance") and not robot.sync_within_tolerance(0.020):
+                sync_row_recorded = False
+                events["_sync_rejected_count"] = events.get("_sync_rejected_count", 0) + 1
+                if events["_sync_rejected_count"] <= 5 or events["_sync_rejected_count"] % 50 == 0:
+                    logger.warning(
+                        "Skipping unsynchronized frame %d (total rejected=%d)",
+                        events.get("_sync_frame_index", 0), events["_sync_rejected_count"],
+                    )
+            else:
+                sync_row_recorded = _record_sync_timestamp(robot, events, dataset)
+            # A frame without timing provenance cannot be validated or safely
+            # used for training. Keep data and sidecar row counts identical.
+            if not sync_row_recorded:
+                events["_sync_rejected_count"] = events.get("_sync_rejected_count", 0) + 1
+                # Preserve the control cadence even when a sample is rejected;
+                # otherwise the next camera read happens immediately and can
+                # make the physical motion/video look bursty.
+                rejected_dt = time.perf_counter() - start_loop_t
+                precise_sleep(max(control_interval - rejected_dt, 0.0))
+                continue
             if events.get("_captured_home_state") is None:
                 # Capture the raw state as the true home state!
                 try:
@@ -1453,6 +1618,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
     global current_phase, phase_start_time, current_episode, saved_episodes, active_robot
 
     web_events.setdefault("_sync_rows", [])
+    web_events.setdefault("_sync_pending_rows", [])
 
     if getattr(cfg.robot, "type", "") == "openarm_ros":
         from lelab.robots.openarm_ros import OpenArmRosRobot
@@ -1637,7 +1803,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     target_home_state = calib_data["live_robot_home_state"]
     except Exception as e:
         logger.warning(f"Failed to load target home state from calibration.yaml: {e}")
-    web_events["target_home_state"] = target_home_state
+    if web_events.get("target_home_state") is None:
+        web_events["target_home_state"] = target_home_state
 
     # Start with episode 1 - but track it properly
     current_episode = 1
@@ -1651,6 +1818,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 current_phase = "recording"
                 phase_start_time = time.time()
                 web_events["_sync_frame_index"] = 0
+                web_events["_sync_pending_rows"] = []
                 logger.info(f"Starting recording phase for episode {current_episode}")
                 logger.info(f"Events state at start of recording phase: {web_events}")
                 print(
@@ -1701,7 +1869,9 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                             yaml.dump(calib_data, f)
                         logger.info(f"Saved true calibration.yaml to dataset: {calib_path}")
                         web_events["_calibration_saved"] = True
-                        web_events["target_home_state"] = web_events["_captured_home_state"]
+                        # Only overwrite target_home_state if the user didn't explicitly select a home position
+                        if not web_events.get("target_home_state"):
+                            web_events["target_home_state"] = web_events["_captured_home_state"]
                     except Exception as e:
                         logger.warning(f"Failed to save true calibration.yaml: {e}")
 
@@ -1741,6 +1911,22 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
                     log_say("Reset the environment", cfg.play_sounds)
+
+                    # Immediately lock & home arms via module-level singleton (instant, no subprocess)
+                    try:
+                        target_state = web_events.get("target_home_state")
+                        if target_state is not None:
+                            if len(target_state) == 16:
+                                set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[8:15], "right_gripper": target_state[15], "lock_all": True}
+                            elif len(target_state) == 8:
+                                set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7], "lock_all": True}
+                            else:
+                                set_home = {"action": "home_all"}
+                        else:
+                            set_home = {"action": "home_all"}
+                        _send_ui_command(set_home)
+                    except Exception as e:
+                        logger.error(f"Failed to publish homing command during reset: {e}")
 
                     # Reset exit_early flag at the start of each phase
                     web_events["exit_early"] = False
@@ -1785,6 +1971,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 print(f"💾 STATUS CHANGE: Saving episode {current_episode}")
             
                 dataset.save_episode()
+                web_events["_sync_rows"].extend(web_events.pop("_sync_pending_rows", []))
             
                 episode_task = web_events.get("current_task", cfg.dataset.single_task)
                 logger.info(f"✅ Episode {current_episode} saved successfully with task: {episode_task}")
@@ -1814,6 +2001,27 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
                     log_say("Reset the environment", cfg.play_sounds)
+
+                    # Trigger homing during reset phase
+                    try:
+                        import subprocess
+                        import os
+                        import json
+                        script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+                        target_state = web_events.get("target_home_state")
+                        if target_state is not None:
+                            if len(target_state) == 16:
+                                set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[8:15], "right_gripper": target_state[15], "lock_all": True}
+                            elif len(target_state) == 8:
+                                set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7], "lock_all": True}
+                            else:
+                                set_home = None
+                            if set_home:
+                                subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
+                        else:
+                            subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "home_all"})])
+                    except Exception as e:
+                        logger.error(f"Failed to publish homing command during reset: {e}")
 
                     # Reset exit_early flag at the start of each phase
                     web_events["exit_early"] = False
