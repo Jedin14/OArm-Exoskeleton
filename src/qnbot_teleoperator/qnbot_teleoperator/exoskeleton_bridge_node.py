@@ -41,6 +41,7 @@ class ExoskeletonBridgeNode(Node):
         self.declare_parameter('gripper_min_position_m', 0.0)
         self.declare_parameter('gripper_max_position_m', 0.050)
         self.declare_parameter('gripper_close_extra_m', 0.0)
+        self.declare_parameter('homing_gripper_duration_sec', 1.0)
         self.declare_parameter('enable_boot_homing', True)
         self.declare_parameter('boot_homing_duration_sec', 8.0)
         self.declare_parameter('boot_homing_arm_target', [0.0] * 7)
@@ -72,6 +73,9 @@ class ExoskeletonBridgeNode(Node):
             self.gripper_min_position_m = 0.0
             self.gripper_max_position_m = 0.044
         self.gripper_close_extra_m = max(0.0, float(self.get_parameter('gripper_close_extra_m').value))
+        self.homing_gripper_duration_sec = max(
+            0.1, float(self.get_parameter('homing_gripper_duration_sec').value)
+        )
         self.enable_boot_homing = bool(self.get_parameter('enable_boot_homing').value)
         self.boot_homing_duration_sec = max(0.2, float(self.get_parameter('boot_homing_duration_sec').value))
         self.boot_homing_arm_target = self._parse_joint_multipliers(
@@ -119,7 +123,16 @@ class ExoskeletonBridgeNode(Node):
         self.transition_duration = {'left': 8.0, 'right': 8.0}
         from std_msgs.msg import String
         import json
-        self.ui_command_sub = self.create_subscription(String, '/exo/ui_command', self.ui_command_callback, 10)
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+        # Subscriber uses RELIABLE + VOLATILE so it accepts publishers with ANY
+        # durability (both VOLATILE and TRANSIENT_LOCAL).  A TRANSIENT_LOCAL
+        # subscriber would reject VOLATILE publishers — breaking communication.
+        _ui_cmd_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.ui_command_sub = self.create_subscription(String, '/exo/ui_command', self.ui_command_callback, _ui_cmd_qos)
 
         self.last_control_time = None
         self.last_gripper_sent = {'left': 0.0, 'right': 0.0}
@@ -134,6 +147,7 @@ class ExoskeletonBridgeNode(Node):
             f'  gripper_smoothing_alpha: {self.gripper_smoothing_alpha}, gripper_max_delta_per_sec: {self.gripper_max_delta_per_sec}\n'
             f'  gripper_threshold: {self.gripper_threshold}, gripper_action_min_period_sec: {self.gripper_action_min_period_sec}\n'
             f'  gripper_range_m: [{self.gripper_min_position_m}, {self.gripper_max_position_m}], gripper_close_extra_m: {self.gripper_close_extra_m}\n'
+            f'  homing_gripper_duration_sec: {self.homing_gripper_duration_sec}\n'
             f'  enable_boot_homing: {self.enable_boot_homing}, boot_homing_duration_sec: {self.boot_homing_duration_sec}\n'
             f'  left_joint_multipliers: {self.left_joint_multipliers}\n'
             f'  right_joint_multipliers: {self.right_joint_multipliers}\n'
@@ -402,7 +416,18 @@ class ExoskeletonBridgeNode(Node):
             if time_since_transition < self.transition_duration[side]:
                 progress = time_since_transition / self.transition_duration[side]
                 desired_arm = (1.0 - progress) * self.transition_start_arm[side] + progress * target_arm
-                desired_gripper = (1.0 - progress) * self.transition_start_gripper[side] + progress * target_gripper
+                # The gripper does not need to wait for the slower arm
+                # trajectory.  Close/open it on its own short homing ramp.
+                if is_locked:
+                    gripper_progress = min(
+                        1.0, time_since_transition / self.homing_gripper_duration_sec
+                    )
+                else:
+                    gripper_progress = progress
+                desired_gripper = (
+                    (1.0 - gripper_progress) * self.transition_start_gripper[side]
+                    + gripper_progress * target_gripper
+                )
             else:
                 desired_arm = target_arm
                 desired_gripper = target_gripper
@@ -417,9 +442,20 @@ class ExoskeletonBridgeNode(Node):
             # Determine effective max_delta and alpha for this tick
             # During automated transitions, the trajectory is already speed-limited by transition_duration.
             # We bypass individual joint clipping and smoothing lag so all joints stay perfectly coordinated and arrive exactly on time.
+            # When locked and past the transition, command the exact target position
+            # directly — eliminates the exponential-filter steady-state error so
+            # motors converge to the precise home position rather than
+            # asymptotically approaching it.
             if time_since_transition < self.transition_duration[side]:
                 effective_joint_max_delta = 10.0  # Bypass clipping
                 effective_alpha = 1.0             # Bypass exponential lag
+            elif is_locked:
+                # Locked and transition complete: snap to exact target
+                self.cmd_arm[side] = desired_arm.copy() if hasattr(desired_arm, 'copy') else np.array(desired_arm, dtype=float)
+                self.cmd_gripper[side] = desired_gripper
+                self._publish_arm(side, self.cmd_arm[side])
+                self._send_gripper_action(side, self.cmd_gripper[side], now_sec)
+                continue
             else:
                 effective_joint_max_delta = joint_max_delta
                 effective_alpha = self.joint_smoothing_alpha

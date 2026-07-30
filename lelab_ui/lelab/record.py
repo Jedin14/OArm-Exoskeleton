@@ -85,9 +85,15 @@ def _send_ui_command(cmd_dict: dict) -> bool:
             if not rclpy.ok():
                 raise RuntimeError("rclpy not available")
             if _ros_ui_cmd_pub is None:
+                from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+                _ui_cmd_qos = QoSProfile(
+                    depth=10,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.VOLATILE,
+                )
                 _ros_ui_cmd_node = rclpy.create_node('lelab_ui_cmd_singleton')
-                _ros_ui_cmd_pub = _ros_ui_cmd_node.create_publisher(String, '/exo/ui_command', 10)
-                time.sleep(0.25)  # one-time discovery wait
+                _ros_ui_cmd_pub = _ros_ui_cmd_node.create_publisher(String, '/exo/ui_command', _ui_cmd_qos)
+                time.sleep(0.3)  # one-time discovery wait
             msg = String()
             msg.data = cmd_str
             for _ in range(3):  # publish 3x for reliability
@@ -212,6 +218,25 @@ def _write_sync_sidecar(dataset, events: dict) -> None:
         output = pd.concat([pd.read_parquet(path), output], ignore_index=True)
     output.to_parquet(path, index=False)
     logger.info("Wrote synchronization sidecar: %s (%d rows)", path, len(output))
+
+
+def _discard_episode_attempt(dataset) -> None:
+    """Discard an in-progress episode, including any video encoder state."""
+    writer = getattr(dataset, "writer", None)
+    encoder = getattr(writer, "_streaming_encoder", None)
+    if encoder is not None:
+        # Be explicit here: older LeRobot writer versions only cancelled the
+        # encoder indirectly, which could leave discarded frames in a video.
+        try:
+            encoder.cancel_episode()
+        except Exception:
+            logger.debug("Streaming encoder was already inactive", exc_info=True)
+
+    try:
+        dataset.clear_episode_buffer(delete_images=True)
+    except TypeError:
+        # LeRobotDatasetV2 exposes the older no-argument signature.
+        dataset.clear_episode_buffer()
 
 
 def _log_sync_rerun(robot, events: dict) -> None:
@@ -834,6 +859,10 @@ def handle_stop_recording() -> dict[str, Any]:
 
     recording_events["stop_recording"] = True
     recording_events["exit_early"] = True
+    # A stop request ends the current episode after homing; it must not be
+    # mistaken for a natural timeout, which would discard the episode and
+    # enter the re-record/reset path before the arms finish moving home.
+    recording_events["_exit_early_triggered"] = True
     current_phase = "stopping"
     phase_start_time = None
     logger.info("Stop recording triggered from web interface")
@@ -866,6 +895,14 @@ def handle_discard_recording() -> dict[str, Any]:
 
 def handle_exit_early() -> dict[str, Any]:
     """Handle exit early request - replaces right arrow key"""
+    import time
+    now = time.time()
+    last_called = getattr(handle_exit_early, "_last_called", 0)
+    if now - last_called < 1.0:
+        logger.info("Ignoring exit_early request (debounced)")
+        return {"success": False, "message": "Ignoring repeated press (debounce)"}
+    handle_exit_early._last_called = now
+
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     recording_events["exit_early"] = True
@@ -884,6 +921,14 @@ def handle_exit_early() -> dict[str, Any]:
 
 def handle_rerecord_episode() -> dict[str, Any]:
     """Handle rerecord episode request - replaces left arrow key"""
+    import time
+    now = time.time()
+    last_called = getattr(handle_rerecord_episode, "_last_called", 0)
+    if now - last_called < 1.0:
+        logger.info("Ignoring rerecord request (debounced)")
+        return {"success": False, "message": "Ignoring repeated press (debounce)"}
+    handle_rerecord_episode._last_called = now
+
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
     recording_events["rerecord_episode"] = True
@@ -1363,14 +1408,37 @@ def custom_record_loop(
         start_loop_t = time.perf_counter()
 
         if events.get("exit_early") and events.get("_is_homing", False):
-            # Double tap: Force exit immediately
+            if events.get("rerecord_episode"):
+                # Re-record means the entire current attempt is invalid,
+                # including any homing frames already sent to the encoder.
+                # Return immediately so the caller can cancel the encoder and
+                # clear the episode buffer before starting the replacement.
+                events["exit_early"] = False
+                events["_discard_current_attempt"] = True
+                logger.info("Re-record requested during homing; discarding current attempt.")
+                break
+
+            # Ignore additional end/stop requests while homing.  The episode
+            # must remain active until the home target is actually reached.
             events["exit_early"] = False
-            break
+            logger.info("Ignoring end-episode request while homing is in progress.")
 
         if (events.get("exit_early") or (control_time_s - timestamp <= 0.2)) and not events.get("_is_homing", False):
             if dataset is not None:
+                # A re-record request discards this attempt.  Stop the
+                # dataset-backed loop before homing so discarded camera frames
+                # cannot be sent to the video encoder.  The reset phase below
+                # homes the robot with dataset=None.
+                if events.get("rerecord_episode"):
+                    events["exit_early"] = False
+                    events["_discard_current_attempt"] = True
+                    logger.info("Re-record requested; discarding current attempt before homing.")
+                    break
+
                 events["_is_homing"] = True
-                events["_homing_start_time"] = timestamp
+                events["_homing_start_time"] = time.perf_counter()  # wall-clock, immune to pause adjustments
+                events["_last_home_cmd_time"] = 0.0  # force immediate first send
+                events["_home_confirm_start"] = None
                 
                 if events.get("exit_early"):
                     events["exit_early"] = False
@@ -1393,6 +1461,7 @@ def custom_record_loop(
                     else:
                         set_home = {"action": "home_all"}
                     _send_ui_command(set_home)
+                    events["_last_home_cmd_time"] = time.perf_counter()
                 except Exception as e:
                     logger.error(f"Failed to publish homing command: {e}")
                     
@@ -1422,12 +1491,32 @@ def custom_record_loop(
         # Check if homing is complete
         if events.get("_is_homing", False):
             target_state = events.get("target_home_state")
-            elapsed_homing = timestamp - events.get("_homing_start_time", timestamp)
-            # Always enforce timeout regardless of current_state availability
-            if elapsed_homing > 8.0:
-                logger.warning("Homing timeout reached! Ending episode anyway.")
-                print("\n⚠️ Homing timeout reached! Ending episode.")
-                break
+            # Use wall-clock time so homing timeout works even if episode timestamp
+            # is frozen by a camera-freeze auto-pause.
+            elapsed_homing = time.perf_counter() - events.get("_homing_start_time", time.perf_counter())
+
+            # Re-send home command every ~1s to guard against ROS message drops
+            last_home_cmd_time = events.get("_last_home_cmd_time", 0.0)
+            if time.perf_counter() - last_home_cmd_time > 1.0:
+                try:
+                    if target_state is not None:
+                        if len(target_state) == 16:
+                            resend_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[8:15], "right_gripper": target_state[15], "lock_all": True}
+                        elif len(target_state) == 8:
+                            resend_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7], "lock_all": True}
+                        else:
+                            resend_home = {"action": "home_all"}
+                    else:
+                        resend_home = {"action": "home_all"}
+                    _send_ui_command(resend_home)
+                    events["_last_home_cmd_time"] = time.perf_counter()
+                except Exception as e:
+                    logger.error(f"Failed to re-send homing command: {e}")
+
+            # Do not end the episode on a wall-clock timeout.  Homing can take
+            # longer under load, and stopping here truncates the homing frames.
+            if elapsed_homing > 8.0 and int(elapsed_homing) % 5 == 0:
+                logger.warning("Homing is still in progress after %.1fs; waiting for home target.", elapsed_homing)
 
             if current_state is not None and target_state is not None:
                 # Build arm_mode-aware comparison pairs (current_idx, target_idx)
@@ -1435,41 +1524,39 @@ def custom_record_loop(
                 n_cur = len(current_state)
                 n_tgt = len(target_state)
 
-                if n_tgt == 16 and n_cur <= 8:
-                    # Single-arm current state vs full dual-arm target
-                    if arm_mode == "right":
-                        # current_state[0:7] is right arm → target_state[8:15]
-                        pairs = [(i, 8 + i) for i in range(min(7, n_cur))]
-                    else:
-                        # left arm only: current_state[0:7] → target_state[0:7]
-                        pairs = [(i, i) for i in range(min(7, n_cur))]
-                elif n_tgt == 16 and n_cur >= 14:
-                    # Both arms: skip gripper indices (7 and 15)
-                    pairs = [(i, i) for i in range(min(n_cur, n_tgt)) if i % 8 != 7]
-                elif n_tgt == 8 and n_cur <= 8:
-                    # Single-arm target: direct compare (skip gripper index 7)
+                if arm_mode == "right":
+                    # Right arm only mode: current_state[0:7] → target_state[8:15]
+                    pairs = [(i, 8 + i) for i in range(min(7, n_cur, n_tgt - 8))]
+                elif arm_mode == "left":
+                    # Left arm only mode: current_state[0:7] → target_state[0:7]
                     pairs = [(i, i) for i in range(min(7, n_cur, n_tgt))]
                 else:
-                    # Fallback: compare as many joints as possible
-                    pairs = [(i, i) for i in range(min(7, n_cur, n_tgt))]
+                    # Both arms mode: check both, skipping grippers at indices 7 and 15
+                    left_pairs = [(i, i) for i in range(min(7, n_cur, n_tgt))]
+                    right_start = 7 if n_cur <= 14 else 8
+                    right_pairs = [(right_start + i, 8 + i) for i in range(min(7, n_cur - right_start, n_tgt - 8))]
+                    pairs = left_pairs + [p for p in right_pairs if p[0] < n_cur and p[1] < n_tgt]
 
-                tolerance = 0.10  # radians
-                is_home = all(abs(current_state[ci] - target_state[ti]) <= tolerance for ci, ti in pairs)
+                tolerance = 0.15  # radians
+                is_home = bool(pairs) and all(abs(current_state[ci] - target_state[ti]) <= tolerance for ci, ti in pairs)
 
                 if is_home:
-                    # Confirm for 0.3s so we don't break on a transient reading
+                    # Require the target to be observed for a short interval
+                    # so one transient state sample cannot stop recording.
                     if events.get("_home_confirm_start") is None:
-                        events["_home_confirm_start"] = timestamp
-                    elif timestamp - events["_home_confirm_start"] >= 0.3:
+                        events["_home_confirm_start"] = time.perf_counter()
+                    elif time.perf_counter() - events["_home_confirm_start"] >= 0.3:
                         logger.info("Arms reached home! Ending episode.")
                         print("\n✅ Arms reached home. Episode complete.")
                         break
                 else:
-                    events["_home_confirm_start"] = None  # Reset if arm drifts away
+                    events["_home_confirm_start"] = None
 
-            elif current_state is None and elapsed_homing > 2.0:
-                # Robot state unavailable — break after 2s grace period
-                break
+            elif current_state is None:
+                # Keep recording while the robot state is temporarily
+                # unavailable; stopping here would cut off homing.
+                logger.debug("Robot state unavailable during homing; waiting for home confirmation.")
+
 
         # Auto-pause if any camera is frozen, and DO NOT record this tick — the
 
@@ -1813,6 +1900,62 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
     try:
         with VideoEncodingManager(dataset):
             global recording_active
+
+            # Move to home before the first real episode without attaching the
+            # dataset.  The old implementation injected an artificial
+            # ``exit_early`` into the first dataset-backed loop to create a
+            # get-ready phase; those frames could remain in the video/data
+            # buffer and appear as an unexplained prefix of episode 0.
+            if recording_active and not web_events.get("_initial_get_ready_done"):
+                current_phase = "resetting"
+                phase_start_time = time.time()
+                web_events["_initial_get_ready_done"] = True
+                logger.info("Starting dataset-free initial homing before episode 1")
+                print("🔄 STATUS CHANGE: Homing before episode 1 (not recording)")
+
+                try:
+                    target_state = web_events.get("target_home_state")
+                    if target_state is not None and len(target_state) == 16:
+                        set_home = {
+                            "action": "set_home_target",
+                            "left_arm": target_state[0:7],
+                            "left_gripper": target_state[7],
+                            "right_arm": target_state[8:15],
+                            "right_gripper": target_state[15],
+                            "lock_all": True,
+                        }
+                    elif target_state is not None and len(target_state) == 8:
+                        set_home = {
+                            "action": "set_home_target",
+                            "left_arm": target_state[0:7],
+                            "left_gripper": target_state[7],
+                            "right_arm": target_state[0:7],
+                            "right_gripper": target_state[7],
+                            "lock_all": True,
+                        }
+                    else:
+                        set_home = {"action": "home_all"}
+                    _send_ui_command(set_home)
+                except Exception as e:
+                    logger.error(f"Failed to publish initial homing command: {e}")
+
+                web_events["exit_early"] = False
+                custom_record_loop(
+                    robot=robot,
+                    events=web_events,
+                    fps=cfg.dataset.fps,
+                    teleop_action_processor=teleop_action_processor,
+                    robot_action_processor=robot_action_processor,
+                    robot_observation_processor=robot_observation_processor,
+                    teleop=teleop,
+                    dataset=None,
+                    control_time_s=cfg.dataset.reset_time_s,
+                    single_task=cfg.dataset.single_task,
+                    display_data=cfg.display_data,
+                )
+
+                current_phase = "preparing"
+
             while saved_episodes < cfg.dataset.num_episodes and recording_active:
                 # RECORDING PHASE - with dataset (matches original record.py exactly)
                 current_phase = "recording"
@@ -1826,12 +1969,6 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 )
 
                 log_say(f"Recording episode {current_episode}", cfg.play_sounds)
-
-                # Start with a get-ready phase for the first episode
-                if current_episode == 1 and not web_events.get("_initial_get_ready_done"):
-                    web_events["rerecord_episode"] = True
-                    web_events["exit_early"] = True
-                    web_events["_initial_get_ready_done"] = True
 
                 # Add a tracking flag that won't be reset by record_loop
                 web_events["_exit_early_triggered"] = False
@@ -1900,7 +2037,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     )
                     web_events["rerecord_episode"] = False
                     web_events["exit_early"] = False
-                    dataset.clear_episode_buffer()
+                    _discard_episode_attempt(dataset)
 
                     # Go through reset phase before re-recording (don't increment episode counters)
                     # RESET PHASE - without dataset (matches original record.py exactly)
@@ -1912,7 +2049,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                     log_say("Reset the environment", cfg.play_sounds)
 
-                    # Immediately lock & home arms via module-level singleton (instant, no subprocess)
+                    # Trigger homing during reset phase instantly via _send_ui_command
                     try:
                         target_state = web_events.get("target_home_state")
                         if target_state is not None:
@@ -1924,6 +2061,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                                 set_home = {"action": "home_all"}
                         else:
                             set_home = {"action": "home_all"}
+                        
                         _send_ui_command(set_home)
                     except Exception as e:
                         logger.error(f"Failed to publish homing command during reset: {e}")
@@ -2002,12 +2140,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                     log_say("Reset the environment", cfg.play_sounds)
 
-                    # Trigger homing during reset phase
+                    # Trigger homing during inter-episode reset via singleton publisher (instant)
                     try:
-                        import subprocess
-                        import os
-                        import json
-                        script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
                         target_state = web_events.get("target_home_state")
                         if target_state is not None:
                             if len(target_state) == 16:
@@ -2015,11 +2149,10 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                             elif len(target_state) == 8:
                                 set_home = {"action": "set_home_target", "left_arm": target_state[0:7], "left_gripper": target_state[7], "right_arm": target_state[0:7], "right_gripper": target_state[7], "lock_all": True}
                             else:
-                                set_home = None
-                            if set_home:
-                                subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
+                                set_home = {"action": "home_all"}
                         else:
-                            subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "home_all"})])
+                            set_home = {"action": "home_all"}
+                        _send_ui_command(set_home)
                     except Exception as e:
                         logger.error(f"Failed to publish homing command during reset: {e}")
 
