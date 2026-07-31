@@ -1315,6 +1315,8 @@ def custom_custom_record_loop(
             )
 
         dt_s = time.perf_counter() - start_loop_t
+        if dt_s > 0.050:
+            logging.warning(f'Slow loop: {dt_s*1000:.1f}ms')
         sleep_time_s = control_interval - dt_s
         if sleep_time_s < 0:
             pass # ignore slow loop warnings to prevent spam
@@ -1682,7 +1684,7 @@ def custom_record_loop(
         if dataset is not None:
             sync_row_recorded = True
             # Bypass sync check if homing, since teleop is disconnected from robot movement
-            if not events.get("_is_homing", False) and hasattr(robot, "sync_within_tolerance") and not robot.sync_within_tolerance(0.020):
+            if not events.get("_is_homing", False) and hasattr(robot, "sync_within_tolerance") and not robot.sync_within_tolerance(0.050):
                 sync_row_recorded = False
                 events["_sync_rejected_count"] = events.get("_sync_rejected_count", 0) + 1
                 if events["_sync_rejected_count"] <= 5 or events["_sync_rejected_count"] % 50 == 0:
@@ -1731,6 +1733,8 @@ def custom_record_loop(
             )
 
         dt_s = time.perf_counter() - start_loop_t
+        if dt_s > 0.050:
+            logging.warning(f'Slow loop: {dt_s*1000:.1f}ms')
 
         sleep_time_s: float = control_interval - dt_s
         if sleep_time_s < 0:

@@ -560,7 +560,7 @@ class OpenArmRosRobot(Robot):
             diagnostics["action.ros_timestamp"] = max(action_ros, default=0.0)
             return diagnostics
 
-    def sync_within_tolerance(self, tolerance_s: float = 0.020) -> bool:
+    def sync_within_tolerance(self, tolerance_s: float = 0.050) -> bool:
         """Return whether the current row can safely enter the dataset."""
         diagnostics = self.get_sync_diagnostics()
         target = float(diagnostics.get("sync.timestamp", 0.0))
