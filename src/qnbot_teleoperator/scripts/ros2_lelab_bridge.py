@@ -134,9 +134,13 @@ class LeLabBridgeNode(Node):
         def make_cb(name):
             def cb(msg):
                 ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-                # Write JPEG directly to RAM disk
-                with open(f"/dev/shm/lelab_cameras/{name}.jpg", "wb") as f:
+                # Write JPEG directly to RAM disk atomically
+                temp_path = f"/dev/shm/lelab_cameras/{name}_tmp.jpg"
+                final_path = f"/dev/shm/lelab_cameras/{name}.jpg"
+                with open(temp_path, "wb") as f:
                     f.write(bytes(msg.data))
+                import os
+                os.rename(temp_path, final_path)
                 self.latest_cameras[name] = {"timestamp": ts}
             return cb
 

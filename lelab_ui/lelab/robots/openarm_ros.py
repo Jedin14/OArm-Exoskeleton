@@ -189,6 +189,7 @@ class OpenArmRosRobot(Robot):
         return self._is_connected and all(cam.is_connected for cam in self.cameras.values())
 
     def _udp_listen_loop(self):
+        last_decoded_ts = {}
         while not self._stop_event.is_set():
             try:
                 data, _ = self.sock.recvfrom(65535)
@@ -242,6 +243,9 @@ class OpenArmRosRobot(Robot):
                     for cam_name, cam_data in payload.get("cameras", {}).items():
                         try:
                             frame_ts = float(cam_data["timestamp"])
+                            if last_decoded_ts.get(cam_name) == frame_ts:
+                                continue
+                            last_decoded_ts[cam_name] = frame_ts
                             
                             import os
                             shm_path = f"/dev/shm/lelab_cameras/{cam_name}.jpg"

@@ -75,7 +75,7 @@ interface RecordingConfig {
   robot_name?: string;
 }
 
-type Phase = "preparing" | "recording" | "resetting" | "completed";
+type Phase = "preparing" | "recording" | "homing" | "resetting" | "completed";
 
 interface BackendStatus {
   recording_active: boolean;
@@ -426,29 +426,34 @@ const Recording = () => {
 
     if (!next) return;
 
-    if (realPhase === "recording") {
-      // Lock arms to home immediately when episode ends manually
-      setLeftArmFixed(true);
-      setRightArmFixed(true);
-      fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
-      fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
-    }
-
-    setOptimisticPhase(next);
-
     try {
       const response = await fetchWithHeaders(
         `${baseUrl}/recording-exit-early`,
         { method: "POST" }
       );
-      if (!response.ok) {
-        const data = await response.json();
+      const data = await response.json();
+      if (!response.ok || !data.success) {
         setOptimisticPhase(null);
         toast({
-          title: "Error",
-          description: data.message,
-          variant: "destructive",
+          title: "Episode still recording",
+          description: data.message || "Record at least 5 seconds before ending the episode.",
         });
+        return;
+      }
+
+      if (realPhase === "recording") {
+        // Only lock arms after the backend accepts the end command.  This
+        // prevents an ignored early command from moving the robot home.
+        setLeftArmFixed(true);
+        setRightArmFixed(true);
+        fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+        fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+      }
+      // For an episode-ending command, wait for the backend's _is_homing
+      // status instead of showing the next reset phase immediately.  This
+      // keeps the UI aligned with the physical arm transition.
+      if (realPhase !== "recording") {
+        setOptimisticPhase(next);
       }
     } catch (error) {
       setOptimisticPhase(null);
@@ -530,13 +535,22 @@ const Recording = () => {
   const handleStopRecording = useCallback(async () => {
     if (!backendStatus?.available_controls.stop_recording) return;
     try {
-      // Home arms before stopping
-      fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
-      fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
-
-      await fetchWithHeaders(`${baseUrl}/stop-recording`, {
+      const response = await fetchWithHeaders(`${baseUrl}/stop-recording`, {
         method: "POST",
       });
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        toast({
+          title: "Stop ignored",
+          description: data.message || "Record at least 5 seconds before stopping.",
+        });
+        return;
+      }
+
+      // Only home the arms after the backend accepts the stop request.
+      fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+      fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
 
       toast({
         title: "Stopping recording",
@@ -667,7 +681,8 @@ const Recording = () => {
   }
 
   const realPhase = backendStatus.current_phase as Phase;
-  const currentPhase: Phase = optimisticPhase ?? realPhase;
+  const isHoming = Boolean(backendStatus.events_state?._is_homing);
+  const currentPhase: Phase = isHoming ? "homing" : (optimisticPhase ?? realPhase);
   const currentEpisode = backendStatus.current_episode ?? 1;
   const totalEpisodes =
     backendStatus.total_episodes ?? recordingConfig.num_episodes;
@@ -677,7 +692,9 @@ const Recording = () => {
     : backendStatus.phase_elapsed_seconds || 0;
   const phaseTimeLimit =
     currentPhase === "recording"
-      ? recordingConfig.episode_time_s
+      ? Math.max(5, recordingConfig.episode_time_s)
+      : currentPhase === "homing"
+      ? 0
       : currentPhase === "resetting"
       ? recordingConfig.reset_time_s
       : backendStatus.phase_time_limit_s || 0;
@@ -686,6 +703,7 @@ const Recording = () => {
 
   const getStatusText = () => {
     if (currentPhase === "recording") return `RECORDING EPISODE ${currentEpisode}`;
+    if (currentPhase === "homing") return "WAITING FOR ARMS TO REACH HOME";
     if (currentPhase === "resetting") return "RESET — GET READY";
     if (currentPhase === "preparing") return "PREPARING SESSION";
     return "SESSION COMPLETE";
@@ -694,6 +712,8 @@ const Recording = () => {
   const phaseColor =
     currentPhase === "recording"
       ? { dot: "bg-red-500", pill: "bg-red-500/15 text-red-300", timer: "text-green-400", bar: "bg-green-500", button: "bg-green-500 hover:bg-green-600" }
+      : currentPhase === "homing"
+      ? { dot: "bg-orange-500", pill: "bg-orange-500/15 text-orange-300", timer: "text-orange-400", bar: "bg-orange-500", button: "bg-orange-500 hover:bg-orange-600" }
       : currentPhase === "resetting"
       ? { dot: "bg-orange-500", pill: "bg-orange-500/15 text-orange-300", timer: "text-orange-400", bar: "bg-orange-500", button: "bg-orange-500 hover:bg-orange-600" }
       : { dot: "bg-gray-500", pill: "bg-gray-500/15 text-gray-300", timer: "text-gray-400", bar: "bg-gray-500", button: "bg-gray-500" };
@@ -701,11 +721,13 @@ const Recording = () => {
   const primaryLabel =
     currentPhase === "recording"
       ? "End Episode"
+      : currentPhase === "homing"
+      ? "Waiting for Home"
       : currentPhase === "resetting"
       ? "Start Next Episode"
       : "Advance";
 
-  const PrimaryIcon = currentPhase === "recording" ? SkipForward : Play;
+  const PrimaryIcon = currentPhase === "recording" ? SkipForward : currentPhase === "homing" ? Activity : Play;
 
   return (
     <div className="min-h-screen bg-black text-white p-8">
@@ -917,6 +939,7 @@ const Recording = () => {
               disabled={
                 !backendStatus.available_controls.exit_early ||
                 optimisticPhase !== null ||
+                currentPhase === "homing" ||
                 currentPhase === "completed"
               }
               className={`flex-[2] text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}

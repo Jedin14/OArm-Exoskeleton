@@ -450,11 +450,18 @@ class ExoskeletonBridgeNode(Node):
                 effective_joint_max_delta = 10.0  # Bypass clipping
                 effective_alpha = 1.0             # Bypass exponential lag
             elif is_locked:
-                # Locked and transition complete: snap to exact target
+                # Locked and transition complete: snap to exact target.
+                # Only re-send periodically (keep-alive) to avoid flooding
+                # the gripper controller while the arm holds a fixed position.
                 self.cmd_arm[side] = desired_arm.copy() if hasattr(desired_arm, 'copy') else np.array(desired_arm, dtype=float)
                 self.cmd_gripper[side] = desired_gripper
                 self._publish_arm(side, self.cmd_arm[side])
-                self._send_gripper_action(side, self.cmd_gripper[side], now_sec)
+                locked_resend_period = 2.0  # re-send gripper goal at most every 2 s when locked
+                if now_sec - self.last_gripper_sent_time[side] >= locked_resend_period:
+                    # Temporarily mark position as stale so the threshold check
+                    # inside _send_gripper_action doesn't suppress the keep-alive.
+                    self.last_gripper_sent[side] = -1.0
+                    self._send_gripper_action(side, self.cmd_gripper[side], now_sec)
                 continue
             else:
                 effective_joint_max_delta = joint_max_delta

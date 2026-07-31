@@ -36,6 +36,11 @@ from .utils.config import setup_calibration_files, with_lelab_tag
 
 logger = logging.getLogger(__name__)
 
+# Do not allow accidental stop/end commands to create tiny episodes.  This
+# also prevents their homing transition from being written as a malformed
+# video segment.
+MIN_EPISODE_SECONDS = 5.0
+
 # Global variables for recording state
 recording_active = False
 recording_thread: threading.Thread | None = None
@@ -857,6 +862,21 @@ def handle_stop_recording() -> dict[str, Any]:
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
 
+    if current_phase == "recording" and phase_start_time is not None:
+        elapsed = time.time() - phase_start_time
+        if elapsed < MIN_EPISODE_SECONDS:
+            logger.info(
+                "Ignoring stop request %.2fs into episode; minimum is %.1fs",
+                elapsed,
+                MIN_EPISODE_SECONDS,
+            )
+            return {
+                "success": False,
+                "message": f"Stop ignored: record at least {MIN_EPISODE_SECONDS:.0f} seconds of the episode first",
+                "minimum_episode_seconds": MIN_EPISODE_SECONDS,
+                "episode_elapsed_seconds": max(0.0, elapsed),
+            }
+
     recording_events["stop_recording"] = True
     recording_events["exit_early"] = True
     # A stop request ends the current episode after homing; it must not be
@@ -905,6 +925,22 @@ def handle_exit_early() -> dict[str, Any]:
 
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+
+    if current_phase == "recording" and phase_start_time is not None:
+        elapsed = time.time() - phase_start_time
+        if elapsed < MIN_EPISODE_SECONDS:
+            logger.info(
+                "Ignoring end-episode request %.2fs into episode; minimum is %.1fs",
+                elapsed,
+                MIN_EPISODE_SECONDS,
+            )
+            return {
+                "success": False,
+                "message": f"End Episode ignored: record at least {MIN_EPISODE_SECONDS:.0f} seconds first",
+                "minimum_episode_seconds": MIN_EPISODE_SECONDS,
+                "episode_elapsed_seconds": max(0.0, elapsed),
+            }
+
     recording_events["exit_early"] = True
     # Tracking flag that record_loop won't reset, so the worker can tell
     # "user pressed skip" from "control_time_s elapsed naturally".
@@ -1017,7 +1053,9 @@ def handle_recording_status() -> dict[str, Any]:
 
             # Add phase time limits
             if current_phase == "recording":
-                status["phase_time_limit_s"] = recording_config.episode_time_s
+                status["phase_time_limit_s"] = max(
+                    MIN_EPISODE_SECONDS, recording_config.episode_time_s
+                )
             elif current_phase == "resetting":
                 status["phase_time_limit_s"] = recording_config.reset_time_s
     elif session_end_elapsed_seconds is not None:
@@ -1332,6 +1370,8 @@ def custom_record_loop(
     display_data: bool = False,
     display_compressed_images: bool = False,
 ):
+    global current_phase, phase_start_time
+
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
 
@@ -1422,6 +1462,14 @@ def custom_record_loop(
             # must remain active until the home target is actually reached.
             events["exit_early"] = False
             logger.info("Ignoring end-episode request while homing is in progress.")
+
+        if events.get("exit_early") and not events.get("_is_homing", False) and dataset is not None:
+            # Guard against a command racing with the HTTP handler.  An early
+            # command must not enter homing, because those frames would belong
+            # to neither a valid episode nor a valid episode ending.
+            if time.perf_counter() - start_episode_t < MIN_EPISODE_SECONDS:
+                events["exit_early"] = False
+                logger.info("Ignoring end/stop command before the %.1fs episode minimum.", MIN_EPISODE_SECONDS)
 
         if (events.get("exit_early") or (control_time_s - timestamp <= 0.2)) and not events.get("_is_homing", False):
             if dataset is not None:
@@ -1548,6 +1596,15 @@ def custom_record_loop(
                     elif time.perf_counter() - events["_home_confirm_start"] >= 0.3:
                         logger.info("Arms reached home! Ending episode.")
                         print("\n✅ Arms reached home. Episode complete.")
+                        # The physical homing phase is complete now.  Clear
+                        # this before dataset finalization so the UI can move
+                        # to the preparation state instead of displaying the
+                        # homing wait while video encoding takes several more
+                        # seconds.
+                        events["_is_homing"] = False
+                        events["_home_reached"] = True
+                        current_phase = "resetting"
+                        phase_start_time = time.time()
                         break
                 else:
                     events["_home_confirm_start"] = None
@@ -1963,7 +2020,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 web_events["_sync_frame_index"] = 0
                 web_events["_sync_pending_rows"] = []
                 logger.info(f"Starting recording phase for episode {current_episode}")
-                logger.info(f"Events state at start of recording phase: {web_events}")
+                _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                logger.info(f"Events state at start of recording phase: {_loggable}")
                 print(
                     f"🎬 STATUS CHANGE: Starting recording phase for episode {current_episode}/{cfg.dataset.num_episodes}"
                 )
@@ -1972,7 +2030,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                 # Add a tracking flag that won't be reset by record_loop
                 web_events["_exit_early_triggered"] = False
-                logger.info(f"Recording phase - calling record_loop with events: {web_events}")
+                _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                logger.info(f"Recording phase - calling record_loop with events: {_loggable}")
 
                 custom_record_loop(
                     robot=robot,
@@ -1983,12 +2042,13 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     robot_observation_processor=robot_observation_processor,
                     teleop=teleop,
                     dataset=dataset,
-                    control_time_s=cfg.dataset.episode_time_s,
+                    control_time_s=max(MIN_EPISODE_SECONDS, cfg.dataset.episode_time_s),
                     single_task=web_events.get("current_task", cfg.dataset.single_task),
                     display_data=cfg.display_data,
                 )
 
-                logger.info(f"Recording phase completed - events state: {web_events}")
+                _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                logger.info(f"Recording phase completed - events state: {_loggable}")
 
                 # Check if we captured a new home state during this episode
                 if web_events.get("_captured_home_state") is not None and not web_events.get("_calibration_saved"):
@@ -2044,7 +2104,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     current_phase = "resetting"
                     phase_start_time = time.time()
                     logger.info(f"Starting reset phase for re-record of episode {current_episode}")
-                    logger.info(f"Events state at start of reset phase: {web_events}")
+                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    logger.info(f"Events state at start of reset phase: {_loggable}")
                     print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
                     log_say("Reset the environment", cfg.play_sounds)
@@ -2068,7 +2129,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                     # Reset exit_early flag at the start of each phase
                     web_events["exit_early"] = False
-                    logger.info(f"Reset phase - calling record_loop with events: {web_events}")
+                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    logger.info(f"Reset phase - calling record_loop with events: {_loggable}")
 
                     custom_record_loop(
                         robot=robot,
@@ -2085,7 +2147,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                         display_data=cfg.display_data,
                     )
 
-                    logger.info(f"Reset phase completed - events state: {web_events}")
+                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    logger.info(f"Reset phase completed - events state: {_loggable}")
 
                     # Check if reset was interrupted by exit_early
                     if web_events["exit_early"]:
@@ -2135,7 +2198,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     current_phase = "resetting"
                     phase_start_time = time.time()
                     logger.info(f"Starting reset phase for next episode {current_episode}")
-                    logger.info(f"Events state at start of reset phase: {web_events}")
+                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    logger.info(f"Events state at start of reset phase: {_loggable}")
                     print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
                     log_say("Reset the environment", cfg.play_sounds)
@@ -2158,7 +2222,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                     # Reset exit_early flag at the start of each phase
                     web_events["exit_early"] = False
-                    logger.info(f"Reset phase - calling record_loop with events: {web_events}")
+                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    logger.info(f"Reset phase - calling record_loop with events: {_loggable}")
 
                     custom_record_loop(
                         robot=robot,
@@ -2175,7 +2240,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                         display_data=cfg.display_data,
                     )
 
-                    logger.info(f"Reset phase completed - events state: {web_events}")
+                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    logger.info(f"Reset phase completed - events state: {_loggable}")
 
                     # Check if reset was interrupted by exit_early
                     if web_events["exit_early"]:

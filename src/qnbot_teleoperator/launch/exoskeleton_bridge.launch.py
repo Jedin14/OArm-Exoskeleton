@@ -75,7 +75,7 @@ def generate_launch_description():
 
     gripper_action_min_period_sec_arg = DeclareLaunchArgument(
         'gripper_action_min_period_sec',
-        default_value='0.01',
+        default_value='0.15',
         description='夹爪Action最小发送周期（秒）'
     )
 
