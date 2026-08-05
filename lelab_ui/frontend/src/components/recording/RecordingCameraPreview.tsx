@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Camera, Eye, Maximize2, Minimize2, X } from 'lucide-react';
 import { useApi } from '@/contexts/ApiContext';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import CameraSetup from '@/pages/CameraSetup';
 
 interface RecordingCameraPreviewProps {
   cameras: string[];
@@ -9,6 +11,7 @@ interface RecordingCameraPreviewProps {
 export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ cameras }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showSetupModal, setShowSetupModal] = useState(false);
   const [showCameraViewer, setShowCameraViewer] = useState(false);
   // Name of the camera currently enlarged inline, or null for the normal grid.
   const [expandedCam, setExpandedCam] = useState<string | null>(null);
@@ -70,11 +73,10 @@ export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ 
           </button>
           <button
             type="button"
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1 rounded transition-colors disabled:opacity-50"
+            onClick={() => setShowSetupModal(true)}
+            className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1 rounded transition-colors"
           >
-            {isRefreshing ? 'Reconnecting...' : 'Reconnect Cameras'}
+            Manage Cameras
           </button>
         </div>
       </div>
@@ -112,6 +114,16 @@ export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ 
           ))}
         </div>
       )}
+
+      <Dialog open={showSetupModal} onOpenChange={setShowSetupModal}>
+        <DialogContent className="max-w-7xl w-[90vw] max-h-[90vh] bg-black border-gray-800 p-0 overflow-y-auto">
+          <DialogHeader className="sr-only">
+            <DialogTitle>Manage Cameras</DialogTitle>
+            <DialogDescription>Attach and detach cameras</DialogDescription>
+          </DialogHeader>
+          <CameraSetup isModal onClose={() => setShowSetupModal(false)} />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

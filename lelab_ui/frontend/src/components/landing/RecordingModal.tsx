@@ -63,6 +63,8 @@ interface RecordingModalProps {
   setArmMode: (value: string) => void;
   homePositionId: string;
   setHomePositionId: (value: string) => void;
+  includeEePose: boolean;
+  setIncludeEePose: (value: boolean) => void;
 }
 
 const RecordingModal: React.FC<RecordingModalProps> = ({
@@ -96,11 +98,13 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   setArmMode,
   homePositionId,
   setHomePositionId,
+  includeEePose,
+  setIncludeEePose,
 }) => {
   const { auth } = useHfAuth();
   const { baseUrl, fetchWithHeaders } = useApi();
   const isRosMode = !!(robot?.follower_port?.includes("openarm_ros") || robot?.follower_port?.includes("ROS2"));
-  const [rosMappings, setRosMappings] = React.useState<Array<{name: string; device_index: number}>>([]);
+  const [rosMappings, setRosMappings] = React.useState<Array<{name: string; device_index: number | string}>>([]);
   const [positions, setPositions] = React.useState<Array<any>>([]);
 
   React.useEffect(() => {
@@ -466,8 +470,10 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                         <div key={m.name} className="flex items-center gap-3 bg-gray-800/60 border border-gray-700 rounded-lg px-3 py-2 text-sm">
                           <span className="w-2 h-2 rounded-full bg-cyan-400 flex-shrink-0" />
                           <span className="font-medium text-white">{m.name}</span>
-                          <span className="text-xs text-gray-500 font-mono ml-auto">/dev/video{m.device_index}</span>
-                          <span className="text-xs text-cyan-400 font-mono">ROS ✓</span>
+                          <span className="text-xs text-gray-500 font-mono ml-auto max-w-[200px] truncate" title={m.device_index.toString().startsWith('/') ? m.device_index.toString() : `/dev/video${m.device_index}`}>
+                            {m.device_index.toString().startsWith('/') ? m.device_index.toString() : `/dev/video${m.device_index}`}
+                          </span>
+                          <span className="text-xs text-cyan-400 font-mono flex-shrink-0">ROS ✓</span>
                         </div>
                       ))}
                       <p className="text-xs text-gray-500">
@@ -517,6 +523,38 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                     </p>
                   </div>
                 </div>
+                {isRosMode && (
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="includeEePose"
+                      checked={includeEePose}
+                      disabled={isResume}
+                      onCheckedChange={(value) =>
+                        setIncludeEePose(value === true)
+                      }
+                      className="mt-0.5 border-gray-500 data-[state=checked]:bg-red-500 data-[state=checked]:border-red-500 disabled:opacity-60"
+                    />
+                    <div className="space-y-1">
+                      <Label
+                        htmlFor="includeEePose"
+                        className="text-sm font-medium text-gray-200 cursor-pointer"
+                      >
+                        Include end-effector pose in observations
+                      </Label>
+                      <p className="text-xs text-gray-500">
+                        Adds derived end-effector pose and gripper width as
+                        extra observation dims (7 + 1 per arm). Uncheck to
+                        record only the raw joint positions — 8 observations
+                        matching the 8 actions per arm, nothing derived.
+                      </p>
+                      {isResume && (
+                        <p className="text-xs text-gray-500">
+                          Locked to match the existing dataset.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </CollapsibleContent>
             </Collapsible>
           </div>

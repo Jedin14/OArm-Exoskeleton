@@ -50,11 +50,30 @@ recording_start_time = None  # Track when recording started
 session_end_elapsed_seconds = None  # Final session duration after the run ends
 current_episode = 1  # Track current episode number
 saved_episodes = 0  # Track how many episodes have been saved
-current_phase = "preparing"  # Track current phase: "preparing", "recording", "resetting", "completed"
+current_phase = "preparing"  # Track current phase: "preparing", "recording", "saving", "resetting", "completed"
+
+
+def _events_state_for_response(events: dict) -> dict:
+    """Copy of the events dict safe to log or serialize into an HTTP response.
+
+    Excludes ``_sync_rows``/``_sync_pending_rows``: those accumulate one entry
+    per recorded frame for the whole session (tens of thousands by the end)
+    and no caller reads them from here — the frontend only reads keys like
+    ``_is_homing``/``current_robot_state``/``target_home_state``. Including
+    them turned this into an O(total frames so far) dict copy + JSON/repr
+    dump, repeated every ~1s status poll and every phase-transition log line,
+    which measurably slowed down the live capture loop as a session went on.
+    """
+    return {k: v for k, v in events.items() if k not in ("_sync_rows", "_sync_pending_rows")}
 phase_start_time = None  # Track when current phase started
 last_recording_info: dict[str, Any] | None = (
     None  # Snapshot of the most recently completed dataset (for /dataset-info)
 )
+# Persist the last used home position ID so it is automatically re-used when
+# continuing/resuming a recording session without the user having to re-select.
+_last_home_position_id: str | None = None
+_last_home_robot_name: str | None = None
+
 # Reference to the active robot during recording, so the server can query
 # joint positions and camera frames for the live dashboard.
 active_robot = None
@@ -145,6 +164,7 @@ class RecordingRequest(BaseModel):
     arm_mode: str = "both"  # "left", "right", or "both"
     home_position_id: str | None = None  # ID of the chosen arm position for homing
     robot_name: str | None = None  # Name of the robot to lookup position
+    include_ee_pose: bool = True  # Add derived ee_pose/gripper_state observation dims (openarm_ros only)
 
 
 class UploadRequest(BaseModel):
@@ -197,10 +217,15 @@ def _record_sync_timestamp(robot, events: dict, dataset) -> bool:
         ),
         "max_action_delta_ms": float(diagnostics.get("max_action_delta_ms", 0.0)),
     }
+    # camera.*.timestamp is the frame's true capture time. Latency is measured
+    # against wall-clock *now*, not sync_ts: sync_ts is itself derived from these
+    # capture times, so using it would report ~0 and hide the real staleness.
+    _now = time.monotonic()
     for key, value in diagnostics.items():
         if key.startswith("camera.") and key.endswith(".timestamp") and key != "camera.timestamp":
             camera_name = key[len("camera.") : -len(".timestamp")]
             row[f"camera_{camera_name}_timestamp"] = float(value)
+            row[f"camera_{camera_name}_latency_ms"] = (_now - float(value)) * 1000.0
     # Keep rows private to the current recording attempt. The caller commits
     # them only after dataset.save_episode() succeeds, so re-recorded attempts
     # never leak into the sidecar.
@@ -209,8 +234,18 @@ def _record_sync_timestamp(robot, events: dict, dataset) -> bool:
     return True
 
 
-def _write_sync_sidecar(dataset, events: dict) -> None:
-    rows = events.get("_sync_rows", [])
+def _write_sync_sidecar(dataset, rows: list) -> None:
+    """Append sync-diagnostic rows to the dataset's sidecar parquet file.
+
+    Called once per episode (right after that episode's dataset.save_episode()
+    succeeds) rather than accumulated for the whole session and written once
+    at the end: keeping tens of thousands of per-frame dicts alive in memory
+    for the session's whole duration made Python's cyclic GC progressively
+    slower to scan that ever-growing object graph, which showed up as a
+    session-long, worsening capture-loop slowdown (choppier video/state the
+    longer a session ran). Writing+dropping each episode's rows immediately
+    keeps peak live-object count bounded to a single episode's frames.
+    """
     if not rows or not getattr(dataset, "root", None):
         return
     import pandas as pd
@@ -314,6 +349,23 @@ def _infer_arm_mode_from_features(features: Any) -> str:
     if has_right and not has_left:
         return "right"
     return "both"
+
+
+def _infer_include_ee_pose_from_features(features: Any) -> bool:
+    """Infer whether a dataset's observation.state includes derived ee_pose/
+    gripper_state dims (as opposed to just raw joint positions).
+
+    Looks at `observation.state`'s `names` list for `ee_pose_*` tokens.
+    Defaults to True (the long-standing behavior) when the schema can't be
+    interpreted, so older datasets recorded before this toggle existed keep
+    resuming with the same feature set they were created with.
+    """
+    if isinstance(features, dict):
+        feat = features.get("observation.state")
+        if isinstance(feat, dict) and isinstance(feat.get("names"), list):
+            names = [str(n) for n in feat["names"]]
+            return any(n.startswith("ee_pose_") for n in names)
+    return True
 
 
 def _resolve_local_dataset_dir(repo_id: str) -> Path | None:
@@ -464,6 +516,7 @@ def _load_local_dataset_info(repo_id: str) -> dict[str, Any] | None:
             "robot_type": raw.get("robot_type", "Unknown robot"),
             "codebase_version": raw.get("codebase_version", "v2.1"),
             "arm_mode": _infer_arm_mode_from_features(raw.get("features")),
+            "include_ee_pose": _infer_include_ee_pose_from_features(raw.get("features")),
         }
     except Exception as e:
         logger.warning(f"Failed reading local dataset metadata for {repo_id}: {e}")
@@ -570,6 +623,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
             cameras={},  # No hardware camera objects for ROS mode
             arm_mode=request.arm_mode,
             ros_camera_names=_ros_camera_names,
+            include_ee_pose=request.include_ee_pose,
         )
         # We MUST provide a teleop config for lerobot 1.5.0 recording loop
         teleop_config = PassiveROSTeleopConfig()
@@ -609,15 +663,64 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     )
     # LeRobot versions differ on whether vcodec is declared on the config
     # dataclass. Set it after construction. OpenArm capture must never depend
-    # on a real-time encoder: ``auto`` may select NVENC on hosts where CUDA is
-    # present but incompatible, and encoder backpressure can starve capture.
+    # on a real-time encoder: encoding while frames are still being captured
+    # can backpressure add_frame() and starve the 30 FPS capture loop. That is
+    # why streaming_encoding is always forced off below, regardless of vcodec.
+    #
+    # With streaming disabled, encoding only ever runs inside save_episode()
+    # (the "saving" phase, after the episode has already fully landed on
+    # disk), fully decoupled from the real-time capture path. There is no
+    # longer a reason to force slow software libx264 (vcodec="h264") there:
+    # letting it resolve to "auto" picks a hardware encoder (e.g. NVENC) when
+    # one is available and falls back to a software codec otherwise, cutting
+    # save time without touching the parallel_encoding/image_writer_processes
+    # settings that were disabled to work around the encoder-process-pool
+    # freeze bug (multiprocessing forking this process's live ROS sockets and
+    # threads is what caused that, not the codec choice).
     if getattr(robot_config, "type", "") == "openarm_ros":
-        if request.streaming_encoding:
-            logger.warning(
-                "OpenArm recording: disabling streaming video encoding to protect 30 FPS capture"
+        # Video encoding strategy.  With streaming off, LeRobot writes one PNG
+        # per frame per camera and re-encodes them at save time.  Measured on
+        # this hardware with real 640x480 camera frames: PNG encode is ~20ms
+        # per image (plus ~900KB written to disk), so two 30fps cameras cost
+        # ~1.2 cores and ~54MB/s continuously, then pay another ~6ms/frame PNG
+        # decode during save_episode().  Streaming straight into a hardware
+        # H.264 encoder measured ~1.6ms/frame instead, uses one thread per
+        # camera rather than eight PNG writer threads, writes no intermediate
+        # files, and makes save_episode() near-instant.
+        #
+        # Only enable it when a hardware encoder genuinely exists.  That is the
+        # real constraint behind this having been forced off before: a software
+        # fallback (libsvtav1/libx264) is slow enough that feed_frame()'s bounded
+        # queue fills and backpressures the 30fps capture loop.  Hardware
+        # encoding has ~20x headroom against the 33ms frame budget, software
+        # does not.
+        # Codec choice is deliberately software libx264, NOT the GPU encoder.
+        # An nvenc encoder *session* is created lazily inside its first encode
+        # call and takes ~163ms while holding the GIL, and one session is
+        # created per camera per episode -- which stalled the record loop by
+        # ~326ms once per episode and is exactly the frame0->frame1 gap seen in
+        # recorded datasets.  libx264 initializes in ~2ms.  Its higher
+        # per-frame cost (1.5ms vs 0.5ms) does not matter: that work runs on a
+        # background encoder thread which releases the GIL, and two 30fps
+        # cameras need only ~9% of one core.
+        try:
+            import av
+
+            av.codec.Codec("libx264", "w")
+            dataset_config.streaming_encoding = True
+            dataset_config.vcodec = "h264"  # PyAV maps this to libx264
+            logger.info(
+                "OpenArm recording: streaming video encoding enabled (libx264, "
+                "no per-episode encoder-session stall)"
             )
-        dataset_config.streaming_encoding = False
-        dataset_config.vcodec = "h264"
+        except Exception as e:
+            dataset_config.streaming_encoding = False
+            dataset_config.vcodec = "h264"
+            logger.warning(
+                "OpenArm recording: libx264 unavailable (%s); falling back to the "
+                "PNG-then-encode path. Expect higher CPU load during capture.",
+                e,
+            )
     else:
         dataset_config.vcodec = request.vcodec
 
@@ -648,7 +751,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         current_phase, \
         phase_start_time, \
         last_recording_info, \
-        active_robot
+        active_robot, \
+        _last_home_position_id, \
+        _last_home_robot_name
 
     from . import rollout as _rollout, teleoperate as _teleoperate
 
@@ -714,6 +819,18 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                 if p["id"] == request.home_position_id:
                     recording_events["target_home_state"] = p["joint_values"]
                     logger.info(f"Loaded custom home position: {p['name']}")
+                    # Persist so future resume sessions reuse this automatically
+                    _last_home_position_id = request.home_position_id
+                    _last_home_robot_name = request.robot_name
+                    break
+        elif _last_home_position_id and _last_home_robot_name:
+            # No home position selected this session — reuse the last one
+            from lelab.utils.config import get_arm_positions
+            positions = get_arm_positions(_last_home_robot_name)
+            for p in positions:
+                if p["id"] == _last_home_position_id:
+                    recording_events["target_home_state"] = p["joint_values"]
+                    logger.info(f"Reusing previously selected home position: {p['name']}")
                     break
 
         record_config = create_record_config(request)
@@ -951,7 +1068,7 @@ def handle_exit_early() -> dict[str, Any]:
         "success": True,
         "message": f"Exit early triggered successfully for {phase_name}",
         "current_phase": current_phase,
-        "events_state": dict(recording_events),
+        "events_state": _events_state_for_response(recording_events),
     }
 
 
@@ -973,7 +1090,7 @@ def handle_rerecord_episode() -> dict[str, Any]:
     return {
         "success": True,
         "message": "Re-record episode requested successfully",
-        "events_state": dict(recording_events),
+        "events_state": _events_state_for_response(recording_events),
     }
 
 
@@ -998,7 +1115,7 @@ def handle_recording_status() -> dict[str, Any]:
     is_paused = recording_events.get("pause_recording", False) if recording_events else False
     status = {
         "recording_active": recording_active,
-        "current_phase": current_phase,  # "preparing", "recording", "resetting", "completed"
+        "current_phase": current_phase,  # "preparing", "recording", "saving", "resetting", "completed"
         "session_ended": session_ended,  # New field to indicate session completion
         "is_paused": is_paused,
         "available_controls": {
@@ -1027,7 +1144,7 @@ def handle_recording_status() -> dict[str, Any]:
     }
 
     if recording_active and recording_events:
-        status["events_state"] = dict(recording_events)
+        status["events_state"] = _events_state_for_response(recording_events)
 
     # Always echo the stamped dataset id whenever a config exists, so the frontend
     # can read the actual on-disk repo_id (post stamp) for upload navigation.
@@ -1083,8 +1200,11 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
 
     try:
         from lerobot.datasets import LeRobotDataset
+        from lerobot.utils.constants import HF_LEROBOT_HOME
+        from pathlib import Path as _Path
 
-        dataset = LeRobotDataset(request.dataset_repo_id)
+        _local_root = _Path(HF_LEROBOT_HOME).expanduser() / request.dataset_repo_id
+        dataset = LeRobotDataset(request.dataset_repo_id, root=_local_root)
         features = list(dataset.features.keys())
         dataset_tasks = _extract_tasks_from_dataset_meta(getattr(dataset, "meta", None))
         dataset_single_task = dataset_tasks[0] if dataset_tasks else "Unknown task"
@@ -1119,6 +1239,7 @@ def handle_get_dataset_info(request: DatasetInfoRequest) -> dict[str, Any]:
             "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
             "codebase_version": getattr(dataset.meta, "codebase_version", "v3.0"),
             "arm_mode": _infer_arm_mode_from_features(dataset.features),
+            "include_ee_pose": _infer_include_ee_pose_from_features(dataset.features),
         }
     except Exception as e:
         if local_info is not None:
@@ -1166,11 +1287,14 @@ def handle_upload_dataset(request: UploadRequest) -> dict[str, Any]:
     try:
         # Import LeRobotDataset to load and upload the dataset
         from lerobot.datasets import LeRobotDataset
+        from lerobot.utils.constants import HF_LEROBOT_HOME
+        from pathlib import Path as _Path
 
         logger.info(f"Loading dataset {request.dataset_repo_id} for upload")
 
         # Load the dataset from local storage
-        dataset = LeRobotDataset(request.dataset_repo_id)
+        _local_root = _Path(HF_LEROBOT_HOME).expanduser() / request.dataset_repo_id
+        dataset = LeRobotDataset(request.dataset_repo_id, root=_local_root)
 
         logger.info(f"Dataset loaded with {dataset.num_episodes} episodes")
         tags = with_lelab_tag(request.tags)
@@ -1411,6 +1535,15 @@ def custom_record_loop(
         return bool(getattr(robot, "_camera_frozen", None)) and any(robot._camera_frozen.values())
 
     events["_is_homing"] = False
+    # A pause (manual button-B toggle, or an auto camera-freeze pause) must not
+    # leak into the next phase.  Without this, a pause left active when this
+    # phase's control_time_s naturally elapsed (or exit_early broke out of it)
+    # would immediately re-enter the pause-wait spin loop below at the start
+    # of the *next* phase, freezing phase_elapsed_seconds at ~0 indefinitely
+    # since that spin loop advances phase_start_time in lockstep with
+    # wall-clock time while paused.
+    events["pause_recording"] = False
+    events["_freeze_paused"] = False
 
     # Auto-unlock arms based on arm_mode when each recording episode starts.
     # Uses module-level singleton publisher (_send_ui_command) - instant, no subprocess.
@@ -1422,6 +1555,14 @@ def custom_record_loop(
             _send_ui_command({"action": "toggle_left_home",  "value": False})
         if unlock_right:
             _send_ui_command({"action": "toggle_right_home", "value": False})
+
+    # Per-stage timing accumulator, so a loop overrun says *which* stage ate the
+    # budget instead of just "slower than target FPS". perf_counter() costs ~50ns,
+    # so these probes are noise against a 33ms/frame budget. Averages are logged
+    # as one compact line every _PROF_EVERY frames and then reset.
+    _prof: dict[str, float] = {}
+    _prof_n = 0
+    _PROF_EVERY = 300  # ~10s at 30 fps
 
     while timestamp < control_time_s:
         global recording_active
@@ -1523,8 +1664,10 @@ def custom_record_loop(
                 break
 
         # Get robot observation
+        _t_probe = time.perf_counter()
         obs = robot.get_observation()
-        
+        _prof["get_obs"] = _prof.get("get_obs", 0.0) + (time.perf_counter() - _t_probe)
+
         # Always update current_robot_state so UI can display it continuously
         current_state = obs.get("observation.state")
         if current_state is None and hasattr(robot.config, "joint_names"):
@@ -1575,20 +1718,26 @@ def custom_record_loop(
                 n_tgt = len(target_state)
 
                 if arm_mode == "right":
-                    # Right arm only mode: current_state[0:7] → target_state[8:15]
-                    pairs = [(i, 8 + i) for i in range(min(7, n_cur, n_tgt - 8))]
+                    # Right arm only mode: current_state[0:8] → target_state[8:16]
+                    pairs = [(i, 8 + i) for i in range(min(8, n_cur, n_tgt - 8))]
                 elif arm_mode == "left":
-                    # Left arm only mode: current_state[0:7] → target_state[0:7]
-                    pairs = [(i, i) for i in range(min(7, n_cur, n_tgt))]
+                    # Left arm only mode: current_state[0:8] → target_state[0:8]
+                    pairs = [(i, i) for i in range(min(8, n_cur, n_tgt))]
                 else:
-                    # Both arms mode: check both, skipping grippers at indices 7 and 15
-                    left_pairs = [(i, i) for i in range(min(7, n_cur, n_tgt))]
-                    right_start = 7 if n_cur <= 14 else 8
-                    right_pairs = [(right_start + i, 8 + i) for i in range(min(7, n_cur - right_start, n_tgt - 8))]
+                    # Both arms mode: check both, including grippers at indices 7 and 15
+                    num_per_arm = 8 if n_cur > 14 else 7
+                    left_pairs = [(i, i) for i in range(min(num_per_arm, n_cur, n_tgt))]
+                    right_start = num_per_arm
+                    right_pairs = [(right_start + i, 8 + i) for i in range(min(num_per_arm, n_cur - right_start, n_tgt - 8))]
                     pairs = left_pairs + [p for p in right_pairs if p[0] < n_cur and p[1] < n_tgt]
 
-                tolerance = 0.15  # radians
-                is_home = bool(pairs) and all(abs(current_state[ci] - target_state[ti]) <= tolerance for ci, ti in pairs)
+                is_home = bool(pairs)
+                if is_home:
+                    for ci, ti in pairs:
+                        tol = 0.005 if ci in (7, 15) else 0.15  # 5mm for grippers, 0.15 rad for joints
+                        if abs(current_state[ci] - target_state[ti]) > tol:
+                            is_home = False
+                            break
 
                 if is_home:
                     # Require the target to be observed for a short interval
@@ -1600,12 +1749,18 @@ def custom_record_loop(
                         print("\n✅ Arms reached home. Episode complete.")
                         # The physical homing phase is complete now.  Clear
                         # this before dataset finalization so the UI can move
-                        # to the preparation state instead of displaying the
-                        # homing wait while video encoding takes several more
-                        # seconds.
+                        # to a non-countdown "saving" state instead of showing
+                        # the reset get-ready countdown while video encoding
+                        # (dataset.save_episode(), which can take many seconds)
+                        # is still running.  Labeling this "resetting" here
+                        # was wrong: it made phase_elapsed_seconds run for the
+                        # whole encoding duration against reset_time_s, so the
+                        # UI showed the get-ready timer overshoot past its
+                        # limit and then visibly jump back to 0 once the real
+                        # reset phase started afterward.
                         events["_is_homing"] = False
                         events["_home_reached"] = True
-                        current_phase = "resetting"
+                        current_phase = "saving"
                         phase_start_time = time.time()
                         break
                 else:
@@ -1634,12 +1789,15 @@ def custom_record_loop(
             continue
 
         # Applies a pipeline to the raw robot observation, default is IdentityProcessor
+        _t_probe = time.perf_counter()
         obs_processed = robot_observation_processor(obs)
 
         if dataset is not None:
             observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+        _prof["build_obs_frame"] = _prof.get("build_obs_frame", 0.0) + (time.perf_counter() - _t_probe)
 
         # Get action from teleop
+        _t_probe = time.perf_counter()
         if isinstance(teleop, Teleoperator):
             act = teleop.get_action()
             if robot.name == "unitree_g1":
@@ -1668,19 +1826,42 @@ def custom_record_loop(
                     "The robot won't be at its rest position at the start of the next episode."
                 )
             continue
+        _prof["get_action"] = _prof.get("get_action", 0.0) + (time.perf_counter() - _t_probe)
+
+        if events.get("_is_homing", False) and current_state is not None:
+            import torch
+            import numpy as np
+            if isinstance(action_values, torch.Tensor):
+                action_values = torch.tensor(current_state, dtype=action_values.dtype, device=action_values.device)
+            elif isinstance(action_values, np.ndarray):
+                action_values = np.array(current_state, dtype=np.float32)
+            elif isinstance(action_values, dict):
+                # Preserve dict format for robots like openarm_ros
+                new_action = dict(action_values)
+                if hasattr(robot.config, "joint_names"):
+                    # Find if keys are suffixed with .pos
+                    is_pos_suffixed = any(k.endswith(".pos") for k in new_action.keys())
+                    suffix = ".pos" if is_pos_suffixed else ""
+                    for i, name in enumerate(robot.config.joint_names):
+                        if i < len(current_state):
+                            new_action[f"{name}{suffix}"] = current_state[i]
+                action_values = new_action
 
         # Send action to robot
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
         # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
+        _t_probe = time.perf_counter()
         if not events.get("_is_homing", False):
             _sent_action = robot.send_action(robot_action_to_send)
         else:
             # During homing, we let the backend ROS bridge control the arm.
             # We skip sending teleop actions to prevent fighting the homing trajectory.
             _sent_action = robot_action_to_send
+        _prof["send_action"] = _prof.get("send_action", 0.0) + (time.perf_counter() - _t_probe)
 
         # Write to dataset
+        _t_probe = time.perf_counter()
         if dataset is not None:
             sync_row_recorded = True
             # Bypass sync check if homing, since teleop is disconnected from robot movement
@@ -1722,10 +1903,13 @@ def custom_record_loop(
                 except Exception as e:
                     logger.warning(f"Failed to capture live robot state: {e}")
                     events["_captured_home_state"] = []
+            _prof["sync_check"] = _prof.get("sync_check", 0.0) + (time.perf_counter() - _t_probe)
 
+            _t_probe = time.perf_counter()
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
             dataset.add_frame(frame)
+            _prof["add_frame"] = _prof.get("add_frame", 0.0) + (time.perf_counter() - _t_probe)
 
         if display_data:
             log_rerun_data(
@@ -1733,14 +1917,58 @@ def custom_record_loop(
             )
 
         dt_s = time.perf_counter() - start_loop_t
-        if dt_s > 0.050:
-            logging.warning(f'Slow loop: {dt_s*1000:.1f}ms')
+        _prof["tick_total"] = _prof.get("tick_total", 0.0) + dt_s
+        _prof_n += 1
 
         sleep_time_s: float = control_interval - dt_s
-        if sleep_time_s < 0:
-            logging.warning(
-                f"Record loop is running slower ({1 / dt_s:.1f} Hz) than the target FPS ({fps} Hz). Dataset frames might be dropped and robot control might be unstable. Common causes are: 1) Camera FPS not keeping up 2) Policy inference taking too long 3) CPU starvation"
+
+        # Still surface individual pathological stalls (4x budget), which the
+        # aggregate average would smear away -- these are the ones that show up
+        # as a visible jump in the recorded video rather than uniform slowness.
+        if dt_s > control_interval * 4:
+            logger.warning("Loop stall: single frame took %.0fms", dt_s * 1000.0)
+
+        # One aggregated line per _PROF_EVERY frames instead of a per-frame
+        # warning. The old code logged ~1 line per frame once the loop ran even
+        # slightly long (26k lines in a 50-episode session), which is both noise
+        # and per-frame formatting/IO cost inside the very budget it complains
+        # about. The breakdown names the stage responsible.
+        if _prof_n >= _PROF_EVERY:
+            _avg = {k: (v / _prof_n) * 1000.0 for k, v in _prof.items()}
+            _stages = " ".join(
+                f"{k}={_avg[k]:.1f}" for k in sorted(_avg, key=_avg.get, reverse=True) if k != "tick_total"
             )
+            # Sampled once per report (not per frame) so it costs nothing:
+            # how stale the camera frames actually are relative to this row.
+            _cam_lat = ""
+            try:
+                if hasattr(robot, "get_sync_diagnostics"):
+                    _d = robot.get_sync_diagnostics()
+                    _now = time.monotonic()
+                    _lats = {
+                        k[len("camera.") : -len(".timestamp")]: (_now - float(v)) * 1000.0
+                        for k, v in _d.items()
+                        if k.startswith("camera.")
+                        and k.endswith(".timestamp")
+                        and k != "camera.timestamp"
+                    }
+                    if _lats:
+                        _cam_lat = " | cam_latency_ms " + " ".join(
+                            f"{n}={v:.0f}" for n, v in sorted(_lats.items())
+                        )
+            except Exception:
+                pass
+            logger.info(
+                "loop profile over %d frames: %.1f Hz (tick=%.1fms of %.1fms budget) | %s%s",
+                _prof_n,
+                1.0 / _avg["tick_total"] * 1000.0 if _avg.get("tick_total") else 0.0,
+                _avg.get("tick_total", 0.0),
+                control_interval * 1000.0,
+                _stages,
+                _cam_lat,
+            )
+            _prof = {}
+            _prof_n = 0
 
         precise_sleep(max(sleep_time_s, 0.0))
 
@@ -1765,7 +1993,6 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
     global current_phase, phase_start_time, current_episode, saved_episodes, active_robot
 
-    web_events.setdefault("_sync_rows", [])
     web_events.setdefault("_sync_pending_rows", [])
 
     if getattr(cfg.robot, "type", "") == "openarm_ros":
@@ -1787,6 +2014,19 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
     obs_features = hw_to_dataset_features(robot.observation_features, "observation", cfg.dataset.video)
     dataset_features = {**action_features, **obs_features}
 
+    # Number of image/video streams actually written per frame.  This must come
+    # from the dataset schema, NOT len(robot.cameras): openarm_ros serves its
+    # cameras over ROS (self._ros_camera_names) and leaves robot.cameras empty,
+    # so sizing the image-writer pool off robot.cameras gave 4*0 == 0 threads.
+    # LeRobot only creates an AsyncImageWriter when threads or processes are
+    # non-zero, so zero threads silently made _save_image() write PNGs
+    # *synchronously on the record loop thread* -- ~20ms per camera per frame,
+    # i.e. ~40ms of the 33ms budget for two cameras, which is exactly the
+    # ~22fps this was recording at instead of 30.
+    num_video_streams = sum(
+        1 for ft in dataset_features.values() if ft.get("dtype") in ("video", "image")
+    )
+
     if cfg.resume:
         if not cfg.dataset.root:
             import os
@@ -1795,8 +2035,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
             cfg.dataset.root = Path(lerobot_home).expanduser() / cfg.dataset.repo_id
             logger.info(f"🔧 RESUME: Set explicit local root directory path: {cfg.dataset.root}")
 
-        num_cameras = len(robot.cameras) if hasattr(robot, "cameras") else 0
-        
+        num_cameras = num_video_streams
+
         # When resuming, determine version from dataset metadata rather than user selection
         actual_version = dataset_version
         try:
@@ -1818,19 +2058,36 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 use_videos=cfg.dataset.video,
             )
         else:
-            dataset = LeRobotDataset.resume(
-                cfg.dataset.repo_id,
-                root=cfg.dataset.root,
-                batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-                vcodec=cfg.dataset.vcodec,
-                streaming_encoding=cfg.dataset.streaming_encoding,
-                encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
-                encoder_threads=cfg.dataset.encoder_threads,
-                image_writer_processes=cfg.dataset.num_image_writer_processes if num_cameras > 0 else 0,
-                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * num_cameras
-                if num_cameras > 0
-                else 0,
-            )
+            try:
+                dataset = LeRobotDataset.resume(
+                    cfg.dataset.repo_id,
+                    root=cfg.dataset.root,
+                    batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+                    vcodec=cfg.dataset.vcodec,
+                    streaming_encoding=cfg.dataset.streaming_encoding,
+                    encoder_queue_maxsize=cfg.dataset.encoder_queue_maxsize,
+                    encoder_threads=cfg.dataset.encoder_threads,
+                    image_writer_processes=0,
+                    # Streaming encoding feeds frames straight to the video
+                    # encoder, so no PNGs are written and these threads would
+                    # sit idle -- each one is another thread competing for the
+                    # GIL with the capture loop.
+                    image_writer_threads=0
+                    if cfg.dataset.streaming_encoding
+                    else (
+                        cfg.dataset.num_image_writer_threads_per_camera * num_cameras
+                        if num_cameras > 0
+                        else 0
+                    ),
+                )
+            except Exception as e:
+                err_str = str(e)
+                if "404" in err_str or "Repository Not Found" in err_str:
+                    raise RuntimeError(
+                        f"Dataset {cfg.dataset.repo_id} is corrupted (likely due to an interrupted previous recording) "
+                        "and cannot be resumed. Please delete this dataset and create a new one."
+                    ) from e
+                raise
         sanity_check_dataset_robot_compatibility(dataset, robot, cfg.dataset.fps, dataset_features)
     else:
         sanity_check_dataset_name(cfg.dataset.repo_id, None)
@@ -1852,8 +2109,10 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 robot_type=robot.name,
                 features=dataset_features,
                 use_videos=cfg.dataset.video,
-                image_writer_processes=cfg.dataset.num_image_writer_processes,
-                image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+                image_writer_processes=0,
+                image_writer_threads=0
+                if cfg.dataset.streaming_encoding
+                else cfg.dataset.num_image_writer_threads_per_camera * num_video_streams,
                 batch_encoding_size=cfg.dataset.video_encoding_batch_size,
                 vcodec=cfg.dataset.vcodec,
                 streaming_encoding=cfg.dataset.streaming_encoding,
@@ -2024,7 +2283,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 web_events["_sync_frame_index"] = 0
                 web_events["_sync_pending_rows"] = []
                 logger.info(f"Starting recording phase for episode {current_episode}")
-                _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                 logger.info(f"Events state at start of recording phase: {_loggable}")
                 print(
                     f"🎬 STATUS CHANGE: Starting recording phase for episode {current_episode}/{cfg.dataset.num_episodes}"
@@ -2034,7 +2293,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                 # Add a tracking flag that won't be reset by record_loop
                 web_events["_exit_early_triggered"] = False
-                _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                 logger.info(f"Recording phase - calling record_loop with events: {_loggable}")
 
                 custom_record_loop(
@@ -2051,7 +2310,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     display_data=cfg.display_data,
                 )
 
-                _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                 logger.info(f"Recording phase completed - events state: {_loggable}")
 
                 # Check if we captured a new home state during this episode
@@ -2108,7 +2367,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     current_phase = "resetting"
                     phase_start_time = time.time()
                     logger.info(f"Starting reset phase for re-record of episode {current_episode}")
-                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                     logger.info(f"Events state at start of reset phase: {_loggable}")
                     print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
@@ -2133,7 +2392,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                     # Reset exit_early flag at the start of each phase
                     web_events["exit_early"] = False
-                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                     logger.info(f"Reset phase - calling record_loop with events: {_loggable}")
 
                     custom_record_loop(
@@ -2151,7 +2410,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                         display_data=cfg.display_data,
                     )
 
-                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                     logger.info(f"Reset phase completed - events state: {_loggable}")
 
                     # Check if reset was interrupted by exit_early
@@ -2175,8 +2434,8 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                 logger.info(f"💾 Saving episode {current_episode}...")
                 print(f"💾 STATUS CHANGE: Saving episode {current_episode}")
             
-                dataset.save_episode()
-                web_events["_sync_rows"].extend(web_events.pop("_sync_pending_rows", []))
+                dataset.save_episode(parallel_encoding=False)
+                _write_sync_sidecar(dataset, web_events.pop("_sync_pending_rows", []))
             
                 episode_task = web_events.get("current_task", cfg.dataset.single_task)
                 logger.info(f"✅ Episode {current_episode} saved successfully with task: {episode_task}")
@@ -2202,7 +2461,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     current_phase = "resetting"
                     phase_start_time = time.time()
                     logger.info(f"Starting reset phase for next episode {current_episode}")
-                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                     logger.info(f"Events state at start of reset phase: {_loggable}")
                     print(f"🔄 STATUS CHANGE: Starting reset phase for episode {current_episode}")
 
@@ -2226,7 +2485,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
                     # Reset exit_early flag at the start of each phase
                     web_events["exit_early"] = False
-                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                     logger.info(f"Reset phase - calling record_loop with events: {_loggable}")
 
                     custom_record_loop(
@@ -2244,7 +2503,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                         display_data=cfg.display_data,
                     )
 
-                    _loggable = {k: v for k, v in web_events.items() if k not in ("current_robot_state", "_sync_pending_rows")}
+                    _loggable = {k: v for k, v in _events_state_for_response(web_events).items() if k != "current_robot_state"}
                     logger.info(f"Reset phase completed - events state: {_loggable}")
 
                     # Check if reset was interrupted by exit_early
@@ -2258,8 +2517,6 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                         logger.info("🛑 STOP RECORDING requested during reset phase - ending session")
                         print("🛑 STATUS CHANGE: Stop recording requested during reset - ending session")
                         break
-
-        _write_sync_sidecar(dataset, web_events)
 
         # Recording completed
         current_phase = "completed"

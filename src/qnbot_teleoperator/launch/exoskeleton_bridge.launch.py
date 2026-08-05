@@ -69,7 +69,7 @@ def generate_launch_description():
 
     gripper_max_delta_per_sec_arg = DeclareLaunchArgument(
         'gripper_max_delta_per_sec',
-        default_value='0.120',
+        default_value='0.400',
         description='夹爪每秒最大变化（m/s），用于软开合'
     )
 

@@ -1759,7 +1759,7 @@ _bridge_proc_lock = threading.Lock()
 
 class RosCameraMappingEntry(BaseModel):
     name: str  # "main_camera", "right_camera", or "left_camera"
-    device_index: int
+    device_index: int | str
     width: int = 640
     height: int = 480
     fps: int = 30
@@ -1961,10 +1961,21 @@ def get_available_cameras():
                 if display_name in existing_names:
                     display_name = f"{card_name} ({i})"
 
-                seen_cards.add(card_name)
+                # find by-path if available
+                by_path = None
+                try:
+                    by_path_dir = Path("/dev/v4l/by-path")
+                    if by_path_dir.exists():
+                        for entry in by_path_dir.iterdir():
+                            if entry.is_symlink() and entry.resolve() == Path(node).resolve():
+                                by_path = str(entry)
+                                break
+                except Exception:
+                    pass
+
                 cameras.append(
                     {
-                        "index": i,
+                        "index": by_path if by_path else i,
                         "name": display_name,
                         "device_path": bus_info,
                         "available": True,
@@ -1989,8 +2000,21 @@ def get_available_cameras():
                     if not num_str.isdigit():
                         continue
                     cam_index = int(num_str)
-                    if cam_index in index_map:
-                        index_map[cam_index].setdefault("symlink_names", []).append(entry.name)
+                    
+                    # Match by finding the camera that resolves to this videoN node
+                    for cam in cameras:
+                        c_idx = cam["index"]
+                        c_node = None
+                        if isinstance(c_idx, int):
+                            c_node = f"/dev/video{c_idx}"
+                        elif isinstance(c_idx, str):
+                            try:
+                                c_node = str(Path(c_idx).resolve())
+                            except Exception:
+                                pass
+                        
+                        if c_node == str(target):
+                            cam.setdefault("symlink_names", []).append(entry.name)
                 # Sort symlink aliases for deterministic output
                 for cam in cameras:
                     cam["symlink_names"] = sorted(cam.get("symlink_names", []))

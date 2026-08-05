@@ -506,8 +506,11 @@ def ensure_default_position(robot_name: str):
             "id": "ready_pick",
             "name": "Ready to Pick",
             "joint_values": [
-                0.436332312999, 0.0, 0.0, 2.007128639793, 0.0, 0.0, 0.0, 0.0,  # Left + Gripper
-                -0.436332312999, 0.0, 0.0, 2.007128639793, 0.0, 0.0, 0.0, 0.0  # Right + Gripper
+                # finger_joint1 is prismatic (meters), limit upper=0.044 per
+                # openarm_hand.xacro -- 1.0 is unreachable and stalls the
+                # is_home homing check forever.
+                0.436332312999, 0.0, 0.0, 2.007128639793, 0.0, 0.0, 0.0, 0.04,  # Left + Gripper
+                -0.436332312999, 0.0, 0.0, 2.007128639793, 0.0, 0.0, 0.0, 0.04  # Right + Gripper
             ],
             "is_default": False,
             "created_at": datetime.now(timezone.utc).isoformat()

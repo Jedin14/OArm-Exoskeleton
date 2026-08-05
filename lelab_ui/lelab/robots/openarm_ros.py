@@ -71,6 +71,11 @@ class OpenArmRosRobotConfig(RobotConfig):
     cameras: dict = field(default_factory=dict)
     arm_mode: str = "both"  # "left", "right", or "both"
     ros_camera_names: list = field(default_factory=list)
+    # When False, observations are just the raw joint positions (8 per arm:
+    # 7 joints + 1 gripper), matching action_features exactly. When True,
+    # also includes derived end-effector pose (7 per arm) and normalized
+    # gripper width (1 per arm) as extra observation dims.
+    include_ee_pose: bool = True
     
     # We define joints depending on the arm mode
     @property
@@ -118,9 +123,29 @@ class OpenArmRosRobot(Robot):
         self._action_timestamps = {}
         self._action_ros_timestamps = {}
         self._data_lock = threading.Lock()
-        self._action_history = deque(maxlen=2000)
+        # get_action_at_sync_time() does a full linear scan of this deque on
+        # every recording tick (30/s). The UDP bridge publishes at 100 Hz
+        # (ros2_lelab_bridge.py), and sync_within_tolerance() already rejects
+        # anything more than 50ms (~5 packets) out of alignment, so a 2s
+        # window (200 packets) is generous margin -- maxlen=2000 (20s) meant
+        # scanning up to 2000 entries x ~16 joints per call for no benefit,
+        # measured at ~3.7ms/call, entirely lost from the 33ms/frame budget.
+        self._action_history = deque(maxlen=200)
+        # Joint-state history, so a dataset row can use the state sample that
+        # matches when its camera frames were actually captured rather than the
+        # newest one. 200 entries at the bridge's 100Hz is 2s of history; the
+        # target is only ~30ms back, so this is generous.
+        self._obs_history = deque(maxlen=200)
+        # Latest true capture timestamp per camera (monotonic).
+        self._camera_capture_ts: dict[str, float] = {}
         self._last_sync_timestamp = 0.0
         self._last_sync_diagnostics = {}
+        # ROS header stamps arrive on the system clock (CLOCK_REALTIME) while
+        # every timestamp we synchronize against is CLOCK_MONOTONIC. Both
+        # advance at the same rate, so one offset converts between them.
+        # CLOCK_MONOTONIC is system-wide on Linux, so this is valid across the
+        # camera-bridge process boundary.
+        self._realtime_to_monotonic = time.time() - time.monotonic()
         
         # Buffer for latest JPEG frames for web preview
         self._latest_frames = {}
@@ -160,18 +185,21 @@ class OpenArmRosRobot(Robot):
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
         features = {f"{name}.pos": float for name in self.config.joint_names}
-        
-        # Only add ee_pose and gripper_state for the selected arms
-        if self.config.arm_mode in ("left", "both"):
-            for i in range(0, 7):
-                features[f"ee_pose_{i}.pos"] = float
-            features["gripper_state_0.pos"] = float
-            
-        if self.config.arm_mode in ("right", "both"):
-            for i in range(7, 14):
-                features[f"ee_pose_{i}.pos"] = float
-            features["gripper_state_1.pos"] = float
-            
+
+        # ee_pose/gripper_state are optional extra observation dims on top of
+        # the raw joint positions above. Skip them when include_ee_pose is
+        # False so observations match action_features 1:1 (8 dims per arm).
+        if self.config.include_ee_pose:
+            if self.config.arm_mode in ("left", "both"):
+                for i in range(0, 7):
+                    features[f"ee_pose_{i}.pos"] = float
+                features["gripper_state_0.pos"] = float
+
+            if self.config.arm_mode in ("right", "both"):
+                for i in range(7, 14):
+                    features[f"ee_pose_{i}.pos"] = float
+                features["gripper_state_1.pos"] = float
+
         # Add cameras
         for cam_name in getattr(self, "_ros_camera_names", []):
             features[cam_name] = (480, 640, 3)
@@ -201,6 +229,42 @@ class OpenArmRosRobot(Robot):
                 action_ros_timestamps = payload.get("action_ros_timestamps", {})
                 obs_payload = payload.get("observation", {})
 
+                # Decode camera frames BEFORE taking _data_lock.  imdecode is
+                # ~1ms per camera and the recorder contends for this same lock
+                # every frame (get_action_at_sync_time / get_sync_diagnostics);
+                # holding it across two JPEG decodes stalled the capture loop.
+                decoded_cams: dict[str, tuple] = {}
+                for cam_name, cam_data in payload.get("cameras", {}).items():
+                    try:
+                        frame_ts = float(cam_data["timestamp"])
+                        if last_decoded_ts.get(cam_name) == frame_ts:
+                            continue
+                        last_decoded_ts[cam_name] = frame_ts
+
+                        shm_path = f"/dev/shm/lelab_cameras/{cam_name}.jpg"
+                        if not os.path.exists(shm_path):
+                            continue
+                        with open(shm_path, "rb") as f:
+                            jpeg_bytes = f.read()
+
+                        import cv2 as _cv2
+                        arr = _cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), _cv2.IMREAD_COLOR)
+                        if arr is None:
+                            continue
+                        frame_rgb = _cv2.cvtColor(arr, _cv2.COLOR_BGR2RGB)
+
+                        # frame_ts is the camera bridge's ROS stamp: the real
+                        # capture instant, on the system clock.  Convert it onto
+                        # the monotonic clock everything else is synchronized
+                        # against, so we can record true capture->row latency
+                        # rather than merely when the packet reached us.
+                        capture_monotonic = frame_ts - self._realtime_to_monotonic
+                        decoded_cams[cam_name] = (frame_rgb, jpeg_bytes, capture_monotonic)
+                        if capture_monotonic > 0:
+                            self._camera_capture_ts[cam_name] = capture_monotonic
+                    except Exception as _e:
+                        logger.debug(f"Camera decode error for {cam_name}: {_e}")
+
                 with self._data_lock:
                     # Parse the bridge's ordered joint_position array.
                     if "joint_position" in obs_payload:
@@ -227,6 +291,15 @@ class OpenArmRosRobot(Robot):
                             self._latest_obs[f"{k}.pos"] = v
                     self._latest_obs_timestamp = observation_timestamp
                     self._last_sync_diagnostics["observation.ros_timestamp"] = observation_ros_timestamp
+                    # Snapshot just the scalar joint/state values (not camera
+                    # arrays) so get_observation() can pick the sample matching
+                    # the camera capture instant.
+                    self._obs_history.append(
+                        (
+                            observation_timestamp,
+                            {k: v for k, v in self._latest_obs.items() if k.endswith(".pos")},
+                        )
+                    )
 
                     for k, v in payload.get("action", {}).items():
                         if f"{k}.pos" in self._latest_action:
@@ -239,35 +312,25 @@ class OpenArmRosRobot(Robot):
                             (received_at, self._latest_action.copy(), self._action_timestamps.copy())
                         )
 
-                    # Decode camera frames delivered via /dev/shm by the ROS bridge
-                    for cam_name, cam_data in payload.get("cameras", {}).items():
-                        try:
-                            frame_ts = float(cam_data["timestamp"])
-                            if last_decoded_ts.get(cam_name) == frame_ts:
-                                continue
-                            last_decoded_ts[cam_name] = frame_ts
-                            
-                            import os
-                            shm_path = f"/dev/shm/lelab_cameras/{cam_name}.jpg"
-                            if not os.path.exists(shm_path):
-                                continue
-                                
-                            with open(shm_path, "rb") as f:
-                                jpeg_bytes = f.read()
-                                
-                            import cv2 as _cv2
-                            arr = _cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), _cv2.IMREAD_COLOR)
-                            if arr is not None:
-                                frame_rgb = _cv2.cvtColor(arr, _cv2.COLOR_BGR2RGB)
-                                self._latest_obs[cam_name] = frame_rgb
-                                self._last_sync_diagnostics[f"camera.{cam_name}.timestamp"] = received_at
-                                with self._frames_lock:
-                                    self._latest_frames[cam_name] = jpeg_bytes
-                        except Exception as _e:
-                            logger.debug(f"Camera decode error for {cam_name}: {_e}")
+                    # Publish the already-decoded frames (cheap: reference
+                    # assignment only, no codec work inside the lock).
+                    for cam_name, (frame_rgb, _jpeg, capture_monotonic) in decoded_cams.items():
+                        self._latest_obs[cam_name] = frame_rgb
+                        # True capture time, not arrival time.  Arrival hides
+                        # pipeline latency entirely, which made the tolerance
+                        # check and every recorded delta understate the real
+                        # misalignment.  The freeze watchdog also reads this and
+                        # is unaffected: its threshold is 1s, far beyond the
+                        # ~28ms capture/arrival difference.
+                        self._last_sync_diagnostics[f"camera.{cam_name}.timestamp"] = capture_monotonic
 
                     if "buttons" in payload:
                         self._latest_buttons = payload["buttons"]
+
+                if decoded_cams:
+                    with self._frames_lock:
+                        for cam_name, (_rgb, jpeg_bytes, _ts) in decoded_cams.items():
+                            self._latest_frames[cam_name] = jpeg_bytes
 
             except socket.timeout:
                 pass
@@ -472,20 +535,45 @@ class OpenArmRosRobot(Robot):
                             logger.debug(f"Failed to encode frame for {cam_key}: {e}")
             
         with self._data_lock:
-            # Use one common target after all modalities have been acquired.
-            # State is held/interpreted at its latest ROS sample, while camera
-            # frames are the latest frames available at this point in time.
-            # The action selector then chooses commands at or before this
-            # target, avoiding future-action leakage into the training row.
-            camera_timestamps = [
-                value for key, value in self._last_sync_diagnostics.items()
-                if key.startswith("camera.") and key.endswith(".timestamp")
-            ]
-            sync_timestamp = max(
-                [sync_timestamp, self._latest_obs_timestamp, *camera_timestamps]
-            )
+            # Align every modality to the instant the IMAGES were captured,
+            # rather than to "now".
+            #
+            # Cameras are the slowest and coarsest modality: at an arbitrary
+            # query moment the newest available frame is already half a frame
+            # period old on average, plus pipeline delay (~28ms total, measured).
+            # Picking a "nearer" frame is impossible -- the newest frame is by
+            # definition the nearest to now -- so that lag cannot be removed.
+            # What it *can* be made to do is stop mismatching the other
+            # modalities: state and action arrive at 100Hz, so we choose the
+            # samples that correspond to when the images were actually taken.
+            # Otherwise every row pairs a ~28ms-old image with a brand-new
+            # state/action, teaching the policy a 28ms-offset mapping with
+            # ~10ms of jitter on top.
+            capture_ts = [v for v in self._camera_capture_ts.values() if v > 0.0]
+            if capture_ts:
+                # Mean, not max: the two cameras free-run at slightly different
+                # rates and cannot be genlocked, so they are captured at
+                # different phases. The mean minimizes total misalignment
+                # across both images.
+                sync_timestamp = sum(capture_ts) / len(capture_ts)
+
+                # Use the state sample nearest that instant instead of the newest.
+                if self._obs_history:
+                    best_ts, best_state = min(
+                        self._obs_history, key=lambda item: abs(item[0] - sync_timestamp)
+                    )
+                    obs.update(best_state)
+                    self._last_sync_diagnostics["observation.timestamp"] = best_ts
+                else:
+                    self._last_sync_diagnostics["observation.timestamp"] = self._latest_obs_timestamp
+            else:
+                # No camera capture times yet (startup): keep prior behaviour.
+                sync_timestamp = max([sync_timestamp, self._latest_obs_timestamp])
+                self._last_sync_diagnostics["observation.timestamp"] = self._latest_obs_timestamp
+
+            # get_action_at_sync_time() selects per-joint commands nearest this
+            # target, so the action lands on the same instant as the images.
             self._last_sync_timestamp = sync_timestamp
-            self._last_sync_diagnostics["observation.timestamp"] = self._latest_obs_timestamp
             self._last_sync_diagnostics["sync.timestamp"] = sync_timestamp
         return obs
 

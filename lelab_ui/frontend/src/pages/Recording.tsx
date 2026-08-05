@@ -72,10 +72,11 @@ interface RecordingConfig {
   dataset_version?: string;
   arm_mode?: string;
   home_position_id?: string;
+  include_ee_pose?: boolean;
   robot_name?: string;
 }
 
-type Phase = "preparing" | "recording" | "homing" | "resetting" | "completed";
+type Phase = "preparing" | "recording" | "homing" | "saving" | "resetting" | "completed";
 
 interface BackendStatus {
   recording_active: boolean;
@@ -693,7 +694,7 @@ const Recording = () => {
   const phaseTimeLimit =
     currentPhase === "recording"
       ? Math.max(5, recordingConfig.episode_time_s)
-      : currentPhase === "homing"
+      : currentPhase === "homing" || currentPhase === "saving"
       ? 0
       : currentPhase === "resetting"
       ? recordingConfig.reset_time_s
@@ -704,6 +705,7 @@ const Recording = () => {
   const getStatusText = () => {
     if (currentPhase === "recording") return `RECORDING EPISODE ${currentEpisode}`;
     if (currentPhase === "homing") return "WAITING FOR ARMS TO REACH HOME";
+    if (currentPhase === "saving") return "SAVING EPISODE…";
     if (currentPhase === "resetting") return "RESET — GET READY";
     if (currentPhase === "preparing") return "PREPARING SESSION";
     return "SESSION COMPLETE";
@@ -712,7 +714,7 @@ const Recording = () => {
   const phaseColor =
     currentPhase === "recording"
       ? { dot: "bg-red-500", pill: "bg-red-500/15 text-red-300", timer: "text-green-400", bar: "bg-green-500", button: "bg-green-500 hover:bg-green-600" }
-      : currentPhase === "homing"
+      : currentPhase === "homing" || currentPhase === "saving"
       ? { dot: "bg-orange-500", pill: "bg-orange-500/15 text-orange-300", timer: "text-orange-400", bar: "bg-orange-500", button: "bg-orange-500 hover:bg-orange-600" }
       : currentPhase === "resetting"
       ? { dot: "bg-orange-500", pill: "bg-orange-500/15 text-orange-300", timer: "text-orange-400", bar: "bg-orange-500", button: "bg-orange-500 hover:bg-orange-600" }
@@ -723,11 +725,13 @@ const Recording = () => {
       ? "End Episode"
       : currentPhase === "homing"
       ? "Waiting for Home"
+      : currentPhase === "saving"
+      ? "Saving Episode"
       : currentPhase === "resetting"
       ? "Start Next Episode"
       : "Advance";
 
-  const PrimaryIcon = currentPhase === "recording" ? SkipForward : currentPhase === "homing" ? Activity : Play;
+  const PrimaryIcon = currentPhase === "recording" ? SkipForward : currentPhase === "homing" || currentPhase === "saving" ? Activity : Play;
 
   return (
     <div className="min-h-screen bg-black text-white p-8">
@@ -940,6 +944,7 @@ const Recording = () => {
                 !backendStatus.available_controls.exit_early ||
                 optimisticPhase !== null ||
                 currentPhase === "homing" ||
+                currentPhase === "saving" ||
                 currentPhase === "completed"
               }
               className={`flex-[2] text-white font-semibold py-6 text-lg disabled:opacity-50 ${phaseColor.button}`}

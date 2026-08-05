@@ -60,15 +60,20 @@ class CameraPublisherNode(Node):
 
         for cam in mappings:
             name = cam["name"]
-            index = int(cam["device_index"])
+            index_raw = cam["device_index"]
+            if isinstance(index_raw, str) and not index_raw.isdigit():
+                index = index_raw
+            else:
+                index = int(index_raw)
             width = int(cam.get("width", 640))
             height = int(cam.get("height", 480))
             fps = int(cam.get("fps", 30))
 
+            device_str = index if isinstance(index, str) else f"/dev/video{index}"
             topic = f"/camera/{name}/image_raw/compressed"
             pub = self.create_publisher(CompressedImage, topic, 10)
             self.get_logger().info(
-                f"  Camera '{name}' -> /dev/video{index} -> {topic}"
+                f"  Camera '{name}' -> {device_str} -> {topic}"
             )
 
             with self._fps_lock:
@@ -110,8 +115,9 @@ class CameraPublisherNode(Node):
         # Force disable dynamic framerate (often enabled by default on IMX cameras in low light)
         # to ensure the camera hardware strictly adheres to the target FPS.
         import subprocess
+        device_str = index if isinstance(index, str) else f"/dev/video{index}"
         subprocess.run(
-            ["v4l2-ctl", "-d", f"/dev/video{index}", "-c", "exposure_dynamic_framerate=0"],
+            ["v4l2-ctl", "-d", device_str, "-c", "exposure_dynamic_framerate=0"],
             stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
         )
 

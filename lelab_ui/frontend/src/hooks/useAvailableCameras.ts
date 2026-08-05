@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useApi } from "@/contexts/ApiContext";
 
 export interface AvailableCamera {
-  index: number;
+  index: number | string;
   name: string;
   deviceId: string;
   available: boolean;
@@ -83,7 +83,7 @@ export function useAvailableCameras({
       }
       const data = await r.json();
       const backendCams: {
-        index: number;
+        index: number | string;
         name?: string;
         device_path?: string;
         available: boolean;

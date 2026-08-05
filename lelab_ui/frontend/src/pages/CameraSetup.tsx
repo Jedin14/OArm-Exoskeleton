@@ -29,7 +29,7 @@ type CameraSlotName = typeof CAMERA_SLOT_NAMES[number];
 
 interface RosCameraMapping {
   name: CameraSlotName;
-  device_index: number;
+  device_index: number | string;
   width: number;
   height: number;
   fps: number;
@@ -46,7 +46,7 @@ const SLOT_LABELS: Record<CameraSlotName, string> = {
   left_camera: "Left Camera",
 };
 
-const CameraSetup: React.FC = () => {
+const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ isModal = false, onClose }) => {
   const { baseUrl, fetchWithHeaders } = useApi();
   const { toast } = useToast();
   const { cameras: availableCameras, isLoading: loadingCameras } = useAvailableCameras();
@@ -152,7 +152,7 @@ const CameraSetup: React.FC = () => {
         method: "POST",
         body: JSON.stringify({
           name: selectedSlot,
-          device_index: parseInt(selectedDeviceIndex),
+          device_index: selectedDeviceIndex.includes("/") ? selectedDeviceIndex : parseInt(selectedDeviceIndex),
           width: 640,
           height: 480,
           fps: 30,
@@ -209,19 +209,21 @@ const CameraSetup: React.FC = () => {
   const anyIssue = bridgeRunning && mappings.some((m) => !cameraStatus[m.name]?.ok);
 
   return (
-    <div className="min-h-screen bg-black text-white">
+    <div className={isModal ? "bg-black text-white" : "min-h-screen bg-black text-white"}>
       {/* Page header */}
-      <div className="sticky z-10 top-0 bg-black/95 backdrop-blur border-b border-gray-800 px-6 py-4">
+      <div className={isModal ? "bg-black/95 border-b border-gray-800 px-6 py-4" : "sticky z-10 top-0 bg-black/95 backdrop-blur border-b border-gray-800 px-6 py-4"}>
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => window.location.href = "/"}
-              className="text-gray-400 hover:text-white"
-            >
-              ← Back
-            </Button>
+            {!isModal && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => window.location.href = "/"}
+                className="text-gray-400 hover:text-white"
+              >
+                ← Back
+              </Button>
+            )}
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
                 <Camera className="w-5 h-5 text-white" />
@@ -314,7 +316,9 @@ const CameraSetup: React.FC = () => {
                     <SelectItem key={cam.index} value={cam.index.toString()} className="text-white hover:bg-gray-700">
                       <div className="flex flex-col">
                         <span className="font-medium">{cam.name}</span>
-                        <span className="text-xs text-gray-400">/dev/video{cam.index}</span>
+                        <span className="text-xs text-gray-400">
+                          {cam.index.toString().startsWith('/') ? cam.index.toString() : `/dev/video${cam.index}`}
+                        </span>
                       </div>
                     </SelectItem>
                   ))}
@@ -475,9 +479,11 @@ const CameraSetup: React.FC = () => {
                     </div>
 
                     <div className="grid grid-cols-3 gap-3 text-xs">
-                      <div className="bg-gray-800/60 rounded-lg px-3 py-2">
+                      <div className="bg-gray-800/60 rounded-lg px-3 py-2 overflow-hidden">
                         <div className="text-gray-500 mb-0.5">Device</div>
-                        <div className="text-gray-200 font-mono">/dev/video{mapping.device_index}</div>
+                        <div className="text-gray-200 font-mono text-xs truncate" title={mapping.device_index.toString().startsWith('/') ? mapping.device_index.toString() : `/dev/video${mapping.device_index}`}>
+                          {mapping.device_index.toString().startsWith('/') ? mapping.device_index.toString() : `/dev/video${mapping.device_index}`}
+                        </div>
                       </div>
                       <div className="bg-gray-800/60 rounded-lg px-3 py-2">
                         <div className="text-gray-500 mb-0.5">Resolution</div>

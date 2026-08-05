@@ -51,7 +51,18 @@ const Landing = () => {
   const [streamingEncoding, setStreamingEncoding] = useState(false);
   const [datasetVersion, setDatasetVersion] = useState("v3.0");
   const [armMode, setArmMode] = useState("both");
-  const [homePositionId, setHomePositionId] = useState("");
+  const [includeEePose, setIncludeEePose] = useState(true);
+  const [homePositionId, setHomePositionIdState] = useState<string>(
+    () => localStorage.getItem("lelab_home_position_id") ?? ""
+  );
+  const setHomePositionId = (id: string) => {
+    setHomePositionIdState(id);
+    if (id) {
+      localStorage.setItem("lelab_home_position_id", id);
+    } else {
+      localStorage.removeItem("lelab_home_position_id");
+    }
+  };
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
 
   const releaseStreamsRef = useRef<(() => void) | null>(null);
@@ -88,6 +99,9 @@ const Landing = () => {
             }
             if (typeof data.codebase_version === "string" && data.codebase_version) {
               setDatasetVersion(data.codebase_version);
+            }
+            if (typeof data.include_ee_pose === "boolean") {
+              setIncludeEePose(data.include_ee_pose);
             }
             const existingTasks = Array.isArray(data.tasks)
               ? data.tasks.filter((t: unknown): t is string => typeof t === "string" && t.trim().length > 0)
@@ -309,6 +323,7 @@ const Landing = () => {
       dataset_version: datasetVersion,
       arm_mode: armMode,
       home_position_id: homePositionId,
+      include_ee_pose: includeEePose,
       robot_name: robot.name,
       cameras: cameraDict,
     };
@@ -443,6 +458,8 @@ const Landing = () => {
         setArmMode={setArmMode}
         homePositionId={homePositionId}
         setHomePositionId={setHomePositionId}
+        includeEePose={includeEePose}
+        setIncludeEePose={setIncludeEePose}
       />
     </div>
   );

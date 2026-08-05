@@ -1,3 +1,4 @@
 gripper_home:
   left_arm_can1: 0.09670405127031323
   right_arm_can0: 0.2157244220645449
+  
