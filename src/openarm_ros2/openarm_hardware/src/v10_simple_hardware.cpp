@@ -99,11 +99,12 @@ void OpenArm_v10HW::generate_joint_names() {
 }
 
 hardware_interface::CallbackReturn OpenArm_v10HW::on_init(
-    const hardware_interface::HardwareInfo& info) {
-  if (hardware_interface::SystemInterface::on_init(info) !=
+    const hardware_interface::HardwareComponentInterfaceParams& params) {
+  if (hardware_interface::SystemInterface::on_init(params) !=
       CallbackReturn::SUCCESS) {
     return CallbackReturn::ERROR;
   }
+  const hardware_interface::HardwareInfo& info = params.hardware_info;
   // Parse configuration
   if (!parse_config(info)) {
     return CallbackReturn::ERROR;

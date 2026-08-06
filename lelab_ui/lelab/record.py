@@ -606,7 +606,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
             )
 
     # Create robot config
-    if "openarm_ros" in request.follower_port or "ROS2 (humble)" in request.follower_port:
+    if "openarm_ros" in request.follower_port or "ROS2 (lyrical)" in request.follower_port:
         from lelab.robots.openarm_ros import OpenArmRosRobotConfig, PassiveROSTeleopConfig
         # Load ROS camera names from mappings file (ignoring UI camera selection for ROS mode)
         import json as _json

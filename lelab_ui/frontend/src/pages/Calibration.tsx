@@ -247,7 +247,7 @@ const Calibration = () => {
     }
 
     // Bypass calibration for ROS 2 Bridge
-    if (port.startsWith("openarm_ros") || port.startsWith("ROS2 (humble)")) {
+    if (port.startsWith("openarm_ros") || port.startsWith("ROS2 (lyrical)")) {
       try {
         const payload = deviceType === "robot" 
           ? { follower_port: port, follower_config: robotName } 
@@ -611,7 +611,7 @@ const Calibration = () => {
                     </Button>
                   ) : (
                     <>
-                      <Button variant="outline" onClick={() => { setPort("ROS2 (humble)"); setIsPortLocked(true); }} className="border-slate-600 bg-slate-700 hover:bg-slate-600 hover:text-white" title="Reset to default">
+                      <Button variant="outline" onClick={() => { setPort("ROS2 (lyrical)"); setIsPortLocked(true); }} className="border-slate-600 bg-slate-700 hover:bg-slate-600 hover:text-white" title="Reset to default">
                         <RotateCcw className="w-4 h-4 mr-2" />
                         Reset
                       </Button>
@@ -629,7 +629,7 @@ const Calibration = () => {
                     />
                   )}
                 </div>
-                {(port.startsWith("ROS2 (humble)") || port.startsWith("openarm_ros")) && (
+                {(port.startsWith("ROS2 (lyrical)") || port.startsWith("openarm_ros")) && (
                   <div className="text-xs text-blue-400 mt-2 font-mono">
                     Subscribing to: /joint_states, /tf, /robot_description
                   </div>

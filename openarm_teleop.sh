@@ -43,7 +43,7 @@ WEBSOCKET_PORT="19091"
 STARTUP_DELAY=3
 CLEAN_START="true"
 
-ROS_DISTRO="${ROS_DISTRO:-humble}"
+ROS_DISTRO="${ROS_DISTRO:-lyrical}"
 
 PIDS=()
 LOG_DIR=""
@@ -81,7 +81,7 @@ Options:
 
 Environment:
   OPENARM_WS            Workspace root (default: script directory)
-  ROS_DISTRO            ROS 2 distro to source (default: humble)
+  ROS_DISTRO            ROS 2 distro to source (default: lyrical)
 
 Exoskeleton host setup:
   1. Connect exoskeleton PC to this machine on the network.
@@ -372,9 +372,11 @@ set -u
 #   PackageNotFoundError: No package metadata was found for qnbot-teleoperator
 # ---------------------------------------------------------------------------
 ensure_qnbot_dist_info() {
-    local site_packages="$WS_DIR/install/qnbot_teleoperator/lib/python3.10/site-packages"
+    local py_version
+    py_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local site_packages="$WS_DIR/install/qnbot_teleoperator/lib/python${py_version}/site-packages"
     local dist_info="$site_packages/qnbot_teleoperator-0.0.0.dist-info"
-    local egg_info="$site_packages/qnbot_teleoperator-0.0.0-py3.10.egg-info"
+    local egg_info="$site_packages/qnbot_teleoperator-0.0.0-py${py_version}.egg-info"
 
     # Already present and valid?
     if [[ -f "$dist_info/METADATA" ]]; then
@@ -382,7 +384,11 @@ ensure_qnbot_dist_info() {
     fi
 
     if [[ ! -d "$egg_info" ]]; then
-        err "Cannot find egg-info at $egg_info — workspace may not be built."
+        egg_info="$WS_DIR/build/qnbot_teleoperator/qnbot_teleoperator.egg-info"
+    fi
+
+    if [[ ! -d "$egg_info" ]]; then
+        err "Cannot find egg-info for qnbot_teleoperator — workspace may not be built."
         return 1
     fi
 

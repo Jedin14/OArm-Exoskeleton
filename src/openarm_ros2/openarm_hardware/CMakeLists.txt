@@ -43,11 +43,11 @@ target_link_libraries(${PROJECT_NAME}
   OpenArmCAN::openarm_can
 )
 
-ament_target_dependencies(${PROJECT_NAME}
-  hardware_interface
-  pluginlib
-  rclcpp
-  rclcpp_lifecycle
+target_link_libraries(${PROJECT_NAME}
+  hardware_interface::hardware_interface
+  pluginlib::pluginlib
+  rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
 )
 
 pluginlib_export_plugin_description_file(hardware_interface openarm_hardware.xml)

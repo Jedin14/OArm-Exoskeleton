@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>openarm_can</name>
+  <version>1.0.0</version>
+  <description>openarm_can</description>
+  <maintainer email="jed@todo.todo">Jed</maintainer>
+  <license>Apache-2.0</license>
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

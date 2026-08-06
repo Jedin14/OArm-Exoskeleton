@@ -1,7 +1,7 @@
-FROM osrf/ros:humble-desktop-full
+FROM osrf/ros:lyrical-desktop-full
 
 COPY ros_entrypoint.sh /ros_entrypoint.sh
-RUN . /opt/ros/humble/setup.sh && \
+RUN . /opt/ros/lyrical/setup.sh && \
     apt update && \
     apt install nlohmann-json3-dev -y && \
     mkdir --parents ~/ros2_ws/src && \

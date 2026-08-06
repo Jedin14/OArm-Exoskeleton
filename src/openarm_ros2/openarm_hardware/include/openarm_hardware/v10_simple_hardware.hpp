@@ -24,6 +24,7 @@
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
+#include "hardware_interface/types/hardware_component_interface_params.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "openarm_hardware/visibility_control.h"
 #include "rclcpp/macros.hpp"
@@ -44,7 +45,7 @@ class OpenArm_v10HW : public hardware_interface::SystemInterface {
 
   TEMPLATES__ROS2_CONTROL__VISIBILITY_PUBLIC
   hardware_interface::CallbackReturn on_init(
-      const hardware_interface::HardwareInfo& info) override;
+      const hardware_interface::HardwareComponentInterfaceParams& params) override;
 
   TEMPLATES__ROS2_CONTROL__VISIBILITY_PUBLIC
   hardware_interface::CallbackReturn on_configure(

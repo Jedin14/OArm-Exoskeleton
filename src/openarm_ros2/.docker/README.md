@@ -9,7 +9,7 @@ host +local:root
 docker run --env DISPLAY=$DISPLAY \
 --volume /tmp/.X11-unix:/tmp/.X11-unix \
 --network=host \
--it thchzh/ros2:openarm-humble \
+-it thchzh/ros2:openarm-lyrical \
 /bin/bash
 ```
 
@@ -23,5 +23,5 @@ ros2 launch -d openarm_bimanual_moveit_config demo.launch.py hardware_type:=sim
 
 # To build the latest image (v0.3)
 ```sh
-docker build --no-cache -t thchzh/ros2:openarm-humble .
+docker build --no-cache -t thchzh/ros2:openarm-lyrical .
 ```
