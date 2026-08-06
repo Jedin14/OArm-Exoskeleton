@@ -799,6 +799,17 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
         logger.info(f"Task: {request.single_task}")
 
         from lelab.server import global_persistent_locks
+
+        # A persistent lock is a per-session choice ("keep this arm locked even
+        # while recording"), but global_persistent_locks is a module global that
+        # nothing ever clears, so a lock set in an earlier session silently
+        # carried into the next one and suppressed that arm's auto-unlock. Start
+        # each session from a clean slate; the Lock buttons still work mid-run.
+        for _arm in ("left", "right"):
+            if global_persistent_locks.get(_arm):
+                logger.info("Clearing stale persistent %s-arm lock from a previous session", _arm)
+            global_persistent_locks[_arm] = False
+
         recording_config = request
         recording_events = {
             "exit_early": False,  # Right arrow key -> "Skip to next episode" button
@@ -1184,6 +1195,15 @@ def handle_recording_status() -> dict[str, Any]:
             status["joint_positions"] = active_robot.get_joint_positions()
         except Exception as e:
             logger.debug(f"Failed to get joint positions for status: {e}")
+
+    # Name the frozen camera(s) so the UI can tell the operator which feed to
+    # fix rather than just that "a" camera stalled.
+    if recording_active and active_robot is not None:
+        frozen_map = getattr(active_robot, "_camera_frozen", None)
+        if isinstance(frozen_map, dict):
+            status["frozen_cameras"] = sorted(
+                name for name, is_frozen in frozen_map.items() if is_frozen
+            )
 
     return status
 

@@ -7,7 +7,7 @@ export interface StartInferenceRequest {
   task: string;
   cameras: Record<string, {
     type: string;
-    camera_index?: number;
+    camera_index?: number | string;
     width: number;
     height: number;
     fps?: number;

@@ -27,6 +27,7 @@ import {
   VolumeX,
   Trash2,
   Activity,
+  AlertTriangle,
 } from "lucide-react";
 import {
   getMuted,
@@ -34,6 +35,8 @@ import {
   playRecordingStartCue,
   playResetStartCue,
   playAutoAdvanceWarning,
+  startFreezeBuzzer,
+  stopFreezeBuzzer,
 } from "@/lib/recordingAudio";
 import { useApi } from "@/contexts/ApiContext";
 import {
@@ -99,6 +102,8 @@ interface BackendStatus {
   joint_positions?: Record<string, number>;
   current_task?: string;
   error?: string | null;
+  frozen_cameras?: string[];
+  events_state?: Record<string, any>;
 }
 
 const Recording = () => {
@@ -119,6 +124,13 @@ const Recording = () => {
   const [optimisticPhase, setOptimisticPhase] = useState<Phase | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  // Camera-freeze alarm. `showFreezeAlert` is the modal; once acknowledged the
+  // buzzer stops but `frozenCameras` keeps a persistent banner on screen for as
+  // long as the feed is still stalled, so silencing the alarm can't be mistaken
+  // for the problem being fixed.
+  const [showFreezeAlert, setShowFreezeAlert] = useState(false);
+  const [frozenCameras, setFrozenCameras] = useState<string[]>([]);
+  const wasFrozenRef = useRef(false);
   const [muted, setMutedState] = useState<boolean>(() => getMuted());
   const [leftArmFixed, setLeftArmFixed] = useState(false);
   const [rightArmFixed, setRightArmFixed] = useState(false);
@@ -180,13 +192,9 @@ const Recording = () => {
     }
   };
 
-  const persistentLeftLockRef = useRef(false);
-  const persistentRightLockRef = useRef(false);
-
   const handleToggleLeftArm = async () => {
     const nextState = !leftArmFixed;
     setLeftArmFixed(nextState);
-    persistentLeftLockRef.current = nextState;
     try {
       await fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, {
         method: "POST",
@@ -204,7 +212,6 @@ const Recording = () => {
   const handleToggleRightArm = async () => {
     const nextState = !rightArmFixed;
     setRightArmFixed(nextState);
-    persistentRightLockRef.current = nextState;
     try {
       await fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, {
         method: "POST",
@@ -223,17 +230,16 @@ const Recording = () => {
     setIsTriggeringHome(true);
     setLeftArmFixed(true);
     setRightArmFixed(true);
-    persistentLeftLockRef.current = true;
-    persistentRightLockRef.current = true;
     try {
-      await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
-        method: "POST",
-        body: JSON.stringify({ arm: "left", locked: true })
-      });
-      await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
-        method: "POST",
-        body: JSON.stringify({ arm: "right", locked: true })
-      });
+      // Deliberately does NOT set a persistent lock. Homing is a transient
+      // "park the arms and hold them there" action, whereas the persistent
+      // lock means "keep this arm locked even once recording starts" and is
+      // what the recorder checks before auto-unlocking the arm being recorded:
+      //   unlock_right = arm_mode in ("both","right") and not persistent_right_lock
+      // This function also runs automatically at session start, so setting the
+      // lock here installed that veto on every session and left the recorded
+      // arm stuck locked until the operator unlocked it by hand.
+      // Persistent intent belongs to the explicit Lock/Unlock buttons only.
       await fetchWithHeaders(`${baseUrl}/trigger-home-now`, {
         method: "POST"
       });
@@ -325,6 +331,26 @@ const Recording = () => {
           warningFiredForPhaseRef.current = { phase: null, episode: null, tick: 0 };
         }
 
+        // Camera-freeze detection. The backend auto-pauses on a stalled feed
+        // (events_state._freeze_paused) and auto-resumes once it recovers, so
+        // this is edge-triggered off that flag rather than off the pause state,
+        // which the operator can also toggle manually.
+        const frozen: string[] = Array.isArray(status.frozen_cameras)
+          ? status.frozen_cameras
+          : [];
+        const isFreezePaused =
+          Boolean(status.events_state?._freeze_paused) || frozen.length > 0;
+        setFrozenCameras(frozen);
+        if (isFreezePaused && !wasFrozenRef.current) {
+          setShowFreezeAlert(true);
+          startFreezeBuzzer();
+        } else if (!isFreezePaused && wasFrozenRef.current) {
+          // Recovered on its own -- stand down without needing acknowledgement.
+          stopFreezeBuzzer();
+          setShowFreezeAlert(false);
+        }
+        wasFrozenRef.current = isFreezePaused;
+
         const elapsed = status.phase_elapsed_seconds || 0;
         const limit = status.phase_time_limit_s || 0;
         const inFinalThreeSeconds = limit > 3 && elapsed >= limit - 3;
@@ -372,7 +398,16 @@ const Recording = () => {
     pollStatus();
     const statusInterval = setInterval(pollStatus, 1000);
     return () => clearInterval(statusInterval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordingSessionStarted, recordingConfig, navigate, baseUrl, fetchWithHeaders]);
+
+  // Never let the buzzer outlive this page (navigation to /upload, unmount, HMR).
+  useEffect(() => stopFreezeBuzzer, []);
+
+  const acknowledgeFreezeAlarm = useCallback(() => {
+    stopFreezeBuzzer();
+    setShowFreezeAlert(false);
+  }, []);
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -793,6 +828,36 @@ const Recording = () => {
             </DropdownMenu>
           </div>
 
+          {frozenCameras.length > 0 && (
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="mb-4 flex items-start gap-3 rounded-lg border border-red-600 bg-red-950/50 px-4 py-3"
+            >
+              <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+              <div className="text-sm">
+                <div className="font-semibold text-red-300">
+                  Camera feed frozen — recording paused
+                </div>
+                <div className="text-red-200/80">
+                  <span className="font-mono">{frozenCameras.join(", ")}</span> —
+                  check the camera, then it auto-resumes once frames resume.
+                </div>
+              </div>
+              {!showFreezeAlert && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => startFreezeBuzzer()}
+                  className="ml-auto flex-shrink-0 border-red-700 text-red-300 hover:bg-red-900/40"
+                >
+                  <Volume2 className="w-4 h-4 mr-1" />
+                  Buzzer
+                </Button>
+              )}
+            </div>
+          )}
+
           <div className="text-center mb-6 flex justify-center gap-3">
             <div
               role="status"
@@ -1046,6 +1111,53 @@ const Recording = () => {
               className="bg-orange-600 hover:bg-orange-700 text-white"
             >
               Lock Home & Re-record
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={showFreezeAlert}
+        onOpenChange={(open) => {
+          // Any dismissal (Esc, overlay click, button) also silences the buzzer,
+          // so the alarm can never keep sounding with no visible way to stop it.
+          if (!open) acknowledgeFreezeAlarm();
+        }}
+      >
+        <AlertDialogContent className="bg-gray-900 border-red-600 text-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-red-400">
+              <AlertTriangle className="w-5 h-5" />
+              Camera feed frozen — recording paused
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-gray-300 space-y-2">
+              <span className="block">
+                {frozenCameras.length > 0 ? (
+                  <>
+                    Stalled feed:{" "}
+                    <span className="font-mono text-red-300">
+                      {frozenCameras.join(", ")}
+                    </span>
+                  </>
+                ) : (
+                  "A camera feed stopped delivering new frames."
+                )}
+              </span>
+              <span className="block">
+                Recording auto-paused so no stale frames enter the dataset, and
+                it will auto-resume by itself if the feed recovers. Silence the
+                buzzer below, then check the camera in the Camera Setup area
+                (cable, USB port, or the ROS camera bridge).
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction
+              onClick={acknowledgeFreezeAlarm}
+              className="bg-red-500 hover:bg-red-600 text-white"
+            >
+              <VolumeX className="w-4 h-4 mr-2" />
+              Silence buzzer
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

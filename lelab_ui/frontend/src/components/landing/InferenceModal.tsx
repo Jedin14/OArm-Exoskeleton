@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { AlertTriangle, CheckCircle, Loader2, Play, VideoOff } from "lucide-react";
 import { RobotRecord } from "@/hooks/useRobots";
+import { CameraIndex } from "@/components/recording/CameraConfiguration";
 import { useApi } from "@/contexts/ApiContext";
 import { useToast } from "@/hooks/use-toast";
 import { useNavigate } from "react-router-dom";
@@ -92,7 +93,7 @@ const InferenceModal: React.FC<Props> = ({
   const [policyConfigError, setPolicyConfigError] = useState<string | null>(null);
 
   // Per expected camera name → user-selected physical camera index (or null).
-  const [cameraBindings, setCameraBindings] = useState<Record<string, number | null>>({});
+  const [cameraBindings, setCameraBindings] = useState<Record<string, CameraIndex | null>>({});
   const { cameras: availableCameras } = useAvailableCameras({ enabled: open });
 
   // Load checkpoints when modal opens.
@@ -135,7 +136,7 @@ const InferenceModal: React.FC<Props> = ({
         // Reset camera bindings to one entry per expected camera name.
         // Preserve any prior selection that's still relevant.
         setCameraBindings((prev) => {
-          const next: Record<string, number | null> = {};
+          const next: Record<string, CameraIndex | null> = {};
           for (const name of Object.keys(cfg.image_features)) {
             next[name] = prev[name] ?? null;
           }
@@ -212,7 +213,7 @@ const InferenceModal: React.FC<Props> = ({
     setSubmitting(true);
     await new Promise((r) => setTimeout(r, 300));
     const cameraDict: Record<string, {
-      type: string; camera_index?: number; width: number; height: number; fps?: number;
+      type: string; camera_index?: CameraIndex; width: number; height: number; fps?: number;
     }> = {};
     for (const [name, dims] of Object.entries(policyConfig.image_features)) {
       const idx = cameraBindings[name];
@@ -248,7 +249,10 @@ const InferenceModal: React.FC<Props> = ({
   };
 
   const onCameraBindingChange = (name: string, value: string) => {
-    const idx = Number(value);
+    // A camera index is either a cv2 integer or a /dev/v4l/by-path/... device
+    // path. Number() on a path yields NaN, which silently bound the camera to
+    // nothing, so only convert when the value really is numeric.
+    const idx: CameraIndex = /^\d+$/.test(value) ? Number(value) : value;
     setCameraBindings((prev) => ({ ...prev, [name]: idx }));
   };
 

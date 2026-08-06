@@ -15,11 +15,17 @@ import { useToast } from "@/hooks/use-toast";
 import { useAvailableCameras } from "@/hooks/useAvailableCameras";
 import { useCameraStream } from "@/hooks/useCameraStream";
 
+/** What the recorder opens for a camera: either a cv2 integer index, or a
+ *  stable device path such as `/dev/v4l/by-path/pci-...-video-index0`. Paths
+ *  are preferred where available because cv2 indices are reassigned across
+ *  reboots and re-plugs; the backend accepts either form. */
+export type CameraIndex = number | string;
+
 export interface CameraConfig {
   id: string;
   name: string;
   type: string;
-  camera_index?: number; // cv2 index — what the recorder opens
+  camera_index?: CameraIndex; // cv2 index or device path — what the recorder opens
   device_id: string; // Browser deviceId matched to the cv2 index by AVFoundation localizedName
   width: number;
   height: number;
