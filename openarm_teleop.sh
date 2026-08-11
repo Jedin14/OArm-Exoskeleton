@@ -372,17 +372,33 @@ set -u
 #   PackageNotFoundError: No package metadata was found for qnbot-teleoperator
 # ---------------------------------------------------------------------------
 ensure_qnbot_dist_info() {
-    local site_packages="$WS_DIR/install/qnbot_teleoperator/lib/python3.10/site-packages"
+    # Derived rather than hardcoded so a Python bump doesn't silently break
+    # every path below (Humble ships 3.10 today).
+    local pyver
+    pyver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+    local site_packages="$WS_DIR/install/qnbot_teleoperator/lib/python${pyver}/site-packages"
     local dist_info="$site_packages/qnbot_teleoperator-0.0.0.dist-info"
-    local egg_info="$site_packages/qnbot_teleoperator-0.0.0-py3.10.egg-info"
 
     # Already present and valid?
     if [[ -f "$dist_info/METADATA" ]]; then
         return 0
     fi
 
-    if [[ ! -d "$egg_info" ]]; then
-        err "Cannot find egg-info at $egg_info — workspace may not be built."
+    # The exact egg-info location/name depends on the setuptools/colcon
+    # version in use: some layouts put a versioned egg-info under
+    # install/.../site-packages, others (newer colcon-core "develop" flow)
+    # only produce an unversioned one under build/<pkg>/.
+    local egg_info=""
+    for candidate in \
+        "$site_packages/qnbot_teleoperator-0.0.0-py${pyver}.egg-info" \
+        "$site_packages/qnbot_teleoperator.egg-info" \
+        "$WS_DIR/build/qnbot_teleoperator/qnbot_teleoperator.egg-info"
+    do
+        [[ -d "$candidate" ]] && { egg_info="$candidate"; break; }
+    done
+
+    if [[ -z "$egg_info" ]]; then
+        err "Cannot find egg-info for qnbot_teleoperator — workspace may not be built."
         return 1
     fi
 
@@ -480,6 +496,14 @@ cleanup() {
             kill -KILL "$pid" 2>/dev/null || true
         fi
     done
+
+    # Hand anything recorded this session back to the host user. The container
+    # runs as root, so datasets land root-owned; LeRobot also writes its .mp4s
+    # via tempfile at mode 0600, which defeats the inherited ACL (the mask
+    # computes to ---). Without this they show up locked in the file manager.
+    if command -v fix-perms >/dev/null 2>&1; then
+        fix-perms >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT INT TERM
 

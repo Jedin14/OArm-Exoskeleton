@@ -739,6 +739,8 @@ def toggle_left_arm_home(req: ToggleArmHomeRequest):
     cmd_str = json.dumps({"action": "toggle_left_home", "value": req.fixed})
     script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
     subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+    if not req.fixed:
+        _operator_took_over("left")
     return {"success": True}
 
 @app.post("/toggle-right-arm-home")
@@ -749,6 +751,8 @@ def toggle_right_arm_home(req: ToggleArmHomeRequest):
     cmd_str = json.dumps({"action": "toggle_right_home", "value": req.fixed})
     script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
     subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+    if not req.fixed:
+        _operator_took_over("right")
     return {"success": True}
 
 @app.post("/trigger-home-now")
@@ -782,6 +786,30 @@ class PersistentLockRequest(BaseModel):
     locked: bool
 
 global_persistent_locks = {"left": False, "right": False}
+
+def _operator_took_over(arm: str) -> None:
+    """
+    A manual unlock during automatic homing means "I am taking over".
+
+    Without this the operator loses: the homing loop re-sends
+    set_home_target with lock_all=True every ~1s, so a manual release is
+    overridden within a second and the arm snaps back to locked. Suppress the
+    re-send and end the homing wait so the button actually holds — and so the
+    episode is not stuck waiting to reach a home it will now never reach,
+    because the arm is deliberately following the exoskeleton again.
+    """
+    try:
+        from lelab.record import recording_events
+    except Exception:
+        return
+    if not recording_events:
+        return
+    if recording_events.get("_is_homing"):
+        recording_events["_homing_resend_gave_up"] = True
+        recording_events["_homing_operator_override"] = True
+        logger.info("Operator manually released the %s arm during homing; "
+                    "cancelling the automatic re-lock.", arm)
+
 
 @app.post("/set-persistent-lock")
 def set_persistent_lock(req: PersistentLockRequest):
@@ -2260,17 +2288,26 @@ def move_to_position(name: str, pos_id: str):
     if len(joint_values) < 16:
         return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid joint values length"})
         
+    # lock_all must be set here. Without it the bridge receives a
+    # set_home_target while the arm is still unlocked, and (before the bridge
+    # was hardened) that started an UNLOCK transition whose target is the live
+    # exoskeleton pose — the arm briefly tracked the operator instead of
+    # homing, with rate limiting bypassed, so a fast operator motion produced a
+    # visible lurch. Every other call site already passes lock_all.
     set_home = {
-        "action": "set_home_target", 
-        "left_arm": joint_values[0:7], 
-        "left_gripper": joint_values[7], 
-        "right_arm": joint_values[8:15], 
-        "right_gripper": joint_values[15]
+        "action": "set_home_target",
+        "left_arm": joint_values[0:7],
+        "left_gripper": joint_values[7],
+        "right_arm": joint_values[8:15],
+        "right_gripper": joint_values[15],
+        "lock_all": True,
     }
     script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
-    subprocess.Popen(["/usr/bin/python3", script_path, json.dumps(set_home)])
+    # Sequential, not two racing subprocesses: these were previously launched
+    # concurrently with no ordering guarantee between them.
+    subprocess.run(["/usr/bin/python3", script_path, json.dumps(set_home)], check=False)
     subprocess.Popen(["/usr/bin/python3", script_path, json.dumps({"action": "home_all"})])
-    
+
     return {"status": "success"}
 
 @app.post("/robots/{name}/positions/set-target")

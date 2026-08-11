@@ -19,6 +19,25 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 
 
+def _ease_in_out(p: float) -> float:
+    """
+    Smoothstep 3p^2 - 2p^3. Maps [0,1] -> [0,1] with ZERO velocity at both
+    ends, so a transition accelerates and decelerates instead of stepping
+    straight to full speed.
+
+    Why this matters for speed: the previous profile was a linear ramp, whose
+    velocity jumps 0 -> full instantaneously at t=0 and back at t=end. That
+    infinite jerk is what forces the very low unlock speed cap (0.15 rad/s,
+    ~36x below the slowest joint's 5.445 rad/s hardware limit) — shortening a
+    linear ramp would slam the motors harder and trip exactly the faults the
+    old comment warned about. Easing removes the jerk, which is what makes a
+    ~1 s unlock safe. Peak velocity is 1.5x the average, so size the speed cap
+    with that headroom in mind.
+    """
+    p = 0.0 if p < 0.0 else (1.0 if p > 1.0 else p)
+    return p * p * (3.0 - 2.0 * p)
+
+
 class ExoskeletonBridgeNode(Node):
     def __init__(self):
         super().__init__('exoskeleton_bridge_node')
@@ -38,10 +57,26 @@ class ExoskeletonBridgeNode(Node):
         self.declare_parameter('gripper_smoothing_alpha', 0.75)
         self.declare_parameter('gripper_max_delta_per_sec', 0.180)
         self.declare_parameter('gripper_action_min_period_sec', 0.01)
+        # Goal effort. The controllers allow 50.0; see _send_gripper_action.
+        self.declare_parameter('gripper_max_effort', 10.0)
         self.declare_parameter('gripper_min_position_m', 0.0)
         self.declare_parameter('gripper_max_position_m', 0.050)
         self.declare_parameter('gripper_close_extra_m', 0.0)
         self.declare_parameter('homing_gripper_duration_sec', 1.0)
+        # Gripper blend time when UNLOCKING back to exoskeleton following.
+        # Independent of the arm's (much longer) unlock ramp — see control_loop.
+        self.declare_parameter('unlock_gripper_duration_sec', 0.4)
+        # Arm unlock (home -> exoskeleton pose) speed. Duration is
+        # max(unlock_duration_sec, distance / unlock_max_speed_rad_s).
+        # Slowest joints (j3/j4) allow 5.445 rad/s; smoothstep peaks at 1.5x
+        # the average, so 2.5 rad/s average -> 3.75 rad/s peak, ~69% of limit.
+        # Homing (exoskeleton pose -> home) uses the same eased profile and the
+        # same speed budget as unlocking; there is no reason for the return
+        # trip to be slower now that the jerk is gone.
+        self.declare_parameter('homing_duration_sec', 1.0)
+        self.declare_parameter('homing_max_speed_rad_s', 2.5)
+        self.declare_parameter('unlock_duration_sec', 1.0)
+        self.declare_parameter('unlock_max_speed_rad_s', 2.5)
         self.declare_parameter('enable_boot_homing', True)
         self.declare_parameter('boot_homing_duration_sec', 8.0)
         self.declare_parameter('boot_homing_arm_target', [0.0] * 7)
@@ -66,6 +101,7 @@ class ExoskeletonBridgeNode(Node):
         self.gripper_action_min_period_sec = max(
             0.01, float(self.get_parameter('gripper_action_min_period_sec').value)
         )
+        self.gripper_max_effort = float(self.get_parameter('gripper_max_effort').value)
         self.gripper_min_position_m = float(self.get_parameter('gripper_min_position_m').value)
         self.gripper_max_position_m = float(self.get_parameter('gripper_max_position_m').value)
         if self.gripper_max_position_m <= self.gripper_min_position_m:
@@ -76,6 +112,13 @@ class ExoskeletonBridgeNode(Node):
         self.homing_gripper_duration_sec = max(
             0.1, float(self.get_parameter('homing_gripper_duration_sec').value)
         )
+        self.unlock_gripper_duration_sec = max(
+            0.05, float(self.get_parameter('unlock_gripper_duration_sec').value)
+        )
+        self.homing_duration_sec = max(0.2, float(self.get_parameter('homing_duration_sec').value))
+        self.homing_max_speed_rad_s = max(0.05, float(self.get_parameter('homing_max_speed_rad_s').value))
+        self.unlock_duration_sec = max(0.2, float(self.get_parameter('unlock_duration_sec').value))
+        self.unlock_max_speed_rad_s = max(0.05, float(self.get_parameter('unlock_max_speed_rad_s').value))
         self.enable_boot_homing = bool(self.get_parameter('enable_boot_homing').value)
         self.boot_homing_duration_sec = max(0.2, float(self.get_parameter('boot_homing_duration_sec').value))
         self.boot_homing_arm_target = self._parse_joint_multipliers(
@@ -121,6 +164,20 @@ class ExoskeletonBridgeNode(Node):
         self.transition_start_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
         self.transition_start_gripper = {'left': 0.0, 'right': 0.0}
         self.transition_duration = {'left': 8.0, 'right': 8.0}
+        # Set by set_home_target to make the control loop recompute a
+        # transition without faking a lock-state change (see ui_command_callback).
+        self.force_transition = {'left': False, 'right': False}
+        # Latched while a homing ramp is in flight, so an unlock arriving
+        # mid-homing cannot divert the arm to the exoskeleton pose.
+        self.homing_active = {'left': False, 'right': False}
+        self.homing_target_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
+        self.homing_target_gripper = {'left': 0.0, 'right': 0.0}
+        # ABSOLUTE wall-clock deadline for the homing latch. Must not be
+        # derived from transition_start_time/transition_duration: an unlock
+        # arriving at episode start overwrites both, which reset the elapsed
+        # time to 0 and kept the latch alive for the whole *unlock* duration —
+        # pinning the arm at home exactly when it should be releasing.
+        self.homing_until = {'left': 0.0, 'right': 0.0}
         from std_msgs.msg import String
         import json
         from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -179,11 +236,29 @@ class ExoskeletonBridgeNode(Node):
                     self.left_fixed_home = True
                     self.right_fixed_home = True
                 
-                # Force the control_loop to compute a fresh transition (and duration!)
-                # by invalidating the lock state so the state-change detector fires on the next tick.
+                # Force the control_loop to recompute the transition (and its
+                # duration) for the new target.
+                #
+                # This used to invalidate lock_state by INVERTING it. That was
+                # unsafe: if this message arrived while the arm was unlocked
+                # (which happens because /positions/{id}/move-to publishes
+                # set_home_target and home_all as two independent processes,
+                # with no ordering guarantee), the inverted lock_state made the
+                # detector fire an UNLOCK transition on the next tick — whose
+                # target is self.input_arm, the live exoskeleton pose. The arm
+                # then tracked the operator for the few ms until home_all
+                # arrived: invisible when still, a visible lurch on fast motion.
+                #
+                # Only force a recompute for an arm that is ALREADY locked, so
+                # this can never initiate exoskeleton following. If the arm is
+                # unlocked we just record the new target; the subsequent
+                # home_all/lock_all sets is_locked and the detector fires a
+                # normal homing transition by itself.
                 for side in ('left', 'right'):
-                    self.lock_state[side] = not (self.left_fixed_home if side == 'left' else self.right_fixed_home)
-                    
+                    if (self.left_fixed_home if side == 'left' else self.right_fixed_home):
+                        self.force_transition[side] = True
+
+
                 self.get_logger().info("UI Command: Custom home target updated (triggered dynamic transition)")
         except Exception as e:
             self.get_logger().error(f"Error parsing ui_command: {e}")
@@ -291,7 +366,15 @@ class ExoskeletonBridgeNode(Node):
 
         goal_msg = GripperCommand.Goal()
         goal_msg.command.position = float(position)
-        goal_msg.command.max_effort = 10.0
+        # Was hardcoded to 10.0 while the controllers permit 50.0
+        # (openarm_v10_bimanual_controllers.yaml), i.e. 20% of the available
+        # force. Under load — closing on an object, or overcoming the
+        # gripper's own mechanical resistance — effort is what bounds closing
+        # SPEED, so the timing parameters alone cannot fix a sluggish close.
+        # Left at 10.0 by default because raising it increases crush force on
+        # whatever is being grasped; raise deliberately with
+        #   ros2 launch ... gripper_max_effort:=25.0
+        goal_msg.command.max_effort = self.gripper_max_effort
         client.send_goal_async(goal_msg)
 
         self.last_gripper_sent[side] = float(position)
@@ -385,12 +468,23 @@ class ExoskeletonBridgeNode(Node):
                     target_gripper = float(
                         np.clip(self.boot_homing_gripper_target, self.gripper_min_position_m, self.gripper_max_position_m)
                     )
+            elif self.homing_active[side]:
+                # A homing transition is still in flight. Do NOT hand control
+                # back to the exoskeleton mid-motion: hold the homing target
+                # until the ramp completes. Without this latch, an unlock
+                # arriving while the arm is on its way home makes it abandon
+                # the trajectory and jump toward the operator's current pose —
+                # the faster the operator is moving, the bigger the lurch.
+                # The latch clears on completion, below.
+                target_arm = self.homing_target_arm[side]
+                target_gripper = self.homing_target_gripper[side]
             else:
                 target_arm = self.input_arm[side] if self.have_input[side] else self.cmd_arm[side]
                 target_gripper = self.input_gripper[side] if self.have_input[side] else self.cmd_gripper[side]
 
-            # Detect state change
-            if is_locked != self.lock_state[side]:
+            # Detect state change (or an explicitly forced recompute)
+            if is_locked != self.lock_state[side] or self.force_transition[side]:
+                self.force_transition[side] = False
                 self.lock_state[side] = is_locked
                 self.transition_start_time[side] = now_sec
                 self.transition_start_arm[side] = self.cmd_arm[side].copy()
@@ -399,31 +493,61 @@ class ExoskeletonBridgeNode(Node):
                 # Compute distance-based duration to prevent overly fast motions
                 max_dist = float(np.max(np.abs(target_arm - self.transition_start_arm[side])))
                 if is_locked:
-                    # Homing motion (end of episode / home button)
-                    # User requested fast homing, max 5 seconds
-                    computed_duration = min(5.0, max(2.0, max_dist / 0.5))
+                    # Homing motion (end of episode / home button). Same eased
+                    # profile and speed budget as unlocking — see _ease_in_out.
+                    computed_duration = max(
+                        self.homing_duration_sec, max_dist / self.homing_max_speed_rad_s
+                    )
                 else:
-                    # Unlocking to exoskeleton - must be slow and safe to avoid motor kills
-                    computed_duration = max(8.0, max_dist / 0.15)
+                    # Unlocking to exoskeleton. Fast is safe here only because
+                    # the profile is eased (see _ease_in_out): zero velocity at
+                    # both ends, no step change. Still speed-capped so a very
+                    # large move stretches rather than exceeding joint limits.
+                    computed_duration = max(
+                        self.unlock_duration_sec, max_dist / self.unlock_max_speed_rad_s
+                    )
                     
                 self.transition_duration[side] = computed_duration
                 
+                if is_locked:
+                    self.homing_active[side] = True
+                    self.homing_target_arm[side] = np.array(target_arm, dtype=float)
+                    self.homing_target_gripper[side] = float(target_gripper)
+                    self.homing_until[side] = now_sec + computed_duration
+
                 action_str = "Locking to home" if is_locked else "Unlocking to exoskeleton"
                 self.get_logger().info(f"{side.capitalize()} arm: {action_str} with {self.transition_duration[side]:.1f}s transition.")
 
             # Apply slow transition if within the dynamic window
+            # Release the homing latch once the ramp has finished, so a later
+            # unlock is honoured normally. Checked after the state-change block
+            # above, so the tick that starts homing has elapsed == 0 and keeps
+            # the latch.
+            if self.homing_active[side] and now_sec >= self.homing_until[side]:
+                self.homing_active[side] = False
+
             time_since_transition = now_sec - self.transition_start_time[side]
             if time_since_transition < self.transition_duration[side]:
-                progress = time_since_transition / self.transition_duration[side]
+                raw_progress = time_since_transition / self.transition_duration[side]
+                # Eased, so the arm glides in and out instead of stepping to
+                # full speed at t=0 and stopping dead at t=end.
+                progress = _ease_in_out(raw_progress)
                 desired_arm = (1.0 - progress) * self.transition_start_arm[side] + progress * target_arm
                 # The gripper does not need to wait for the slower arm
-                # trajectory.  Close/open it on its own short homing ramp.
+                # trajectory in EITHER direction — it gets its own short ramp.
+                #
+                # Unlock previously used `progress`, tying the gripper to the
+                # arm's unlock ramp. That ramp is max(8.0, dist/0.15) seconds,
+                # deliberately slow so the arm cannot lurch to the operator's
+                # pose and trip a motor fault. The gripper is a small
+                # independent actuator with no such constraint, so inheriting
+                # that duration just made it crawl for 8+ s after every
+                # unlock before it would follow the trigger properly.
                 if is_locked:
-                    gripper_progress = min(
-                        1.0, time_since_transition / self.homing_gripper_duration_sec
-                    )
+                    ramp = self.homing_gripper_duration_sec
                 else:
-                    gripper_progress = progress
+                    ramp = self.unlock_gripper_duration_sec
+                gripper_progress = min(1.0, time_since_transition / ramp)
                 desired_gripper = (
                     (1.0 - gripper_progress) * self.transition_start_gripper[side]
                     + gripper_progress * target_gripper

@@ -10,8 +10,63 @@
     <meta property="og:title" content="LeLab" />
     <meta property="og:description" content="LeRobot but on your browser." />
     <meta property="og:type" content="website" />
-    <script type="module" crossorigin src="/assets/index-BTORvVxB.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BEyzVFQj.css">
+
+    <script>
+      // crypto.randomUUID() is only exposed in secure contexts (HTTPS or
+      // localhost). This UI is also served over plain HTTP on a LAN IP, where
+      // it is absent and SingleTabGuard's call to it would blank the whole app.
+      // crypto.getRandomValues() is NOT secure-context gated, so we build on it.
+      if (typeof crypto.randomUUID !== "function") {
+        crypto.randomUUID = function () {
+          const b = crypto.getRandomValues(new Uint8Array(16));
+          b[6] = (b[6] & 0x0f) | 0x40; // version 4
+          b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+          const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+          return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+        };
+      }
+
+      // navigator.mediaDevices is likewise secure-context-only, and is
+      // undefined when this UI is served over plain HTTP on a LAN IP. Unlike
+      // randomUUID it CANNOT be meaningfully polyfilled — there is no way to
+      // reach a camera from an insecure origin. But useAvailableCameras.ts
+      // calls it unguarded in a mount effect, so its absence throws and blanks
+      // the entire Camera Setup page, hiding the ROS camera configuration too.
+      //
+      // This stub is a graceful degradation, not a fake: it reports zero
+      // browser cameras and rejects getUserMedia with an explicit reason, so
+      // ROS cameras remain configurable over HTTP. For real browser/phone
+      // cameras, open the UI on http://localhost:8000 (localhost counts as a
+      // secure context) or serve it over HTTPS.
+      if (!navigator.mediaDevices) {
+        const reason = () =>
+          Promise.reject(
+            new DOMException(
+              "Camera access needs a secure context. Open this page on " +
+                "http://localhost:8000 or serve it over HTTPS.",
+              "NotAllowedError"
+            )
+          );
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: {
+            enumerateDevices: () => Promise.resolve([]),
+            getUserMedia: reason,
+            getDisplayMedia: reason,
+            addEventListener() {},
+            removeEventListener() {},
+            dispatchEvent() { return false; },
+          },
+        });
+        console.warn(
+          "[lelab] navigator.mediaDevices unavailable (insecure origin). " +
+            "Browser cameras are disabled; ROS cameras still work. " +
+            "Use http://localhost:8000 for browser cameras."
+        );
+      }
+    </script>
+    <script type="module" crossorigin src="/assets/index-DRfJm6jS.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-TRHn5hFK.css">
   </head>
 
   <body>

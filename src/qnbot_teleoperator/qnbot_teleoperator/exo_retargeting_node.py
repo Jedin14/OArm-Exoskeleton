@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 import os
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -33,6 +34,44 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
+
+
+def _soft_limit(x: float, lower: float, upper: float, knee: float = 0.85) -> float:
+    """
+    平滑限位：在 knee 以内保持线性，超过后用 tanh 压缩，渐近但永不到达限位。
+
+    Why this exists: np.clip writes the exact limit value into the recorded
+    action whenever the operator over-reaches. Repeated across an episode that
+    creates a large point mass at the rail — a confident, scene-independent
+    label that teaches a policy "this joint is often exactly at the limit".
+    On OpenArm v10, joint6 (+/-45deg, the narrowest joint) saturated in 15% of
+    recorded episodes this way.
+
+    Soft limiting keeps the joint inside its mechanical range while mapping the
+    over-reach onto a continuum, so the action distribution stays smooth and no
+    frame has to be masked out of training.
+
+    Linear below `knee` (fraction of the half-range) and C1-continuous at the
+    knee, since d/du[tanh(u/(1-k))*(1-k)] = 1 at u = 0.
+    """
+    half = 0.5 * (upper - lower)
+    if half <= 0.0:
+        return float(np.clip(x, lower, upper))
+    center = 0.5 * (lower + upper)
+    u = (x - center) / half                      # +/-1 at the limits
+    k = min(max(knee, 0.0), 0.999)
+    if abs(u) > k:
+        sign = math.copysign(1.0, u)
+        over = abs(u) - k
+        # The (1 - 1e-6) factor matters: for a large enough over-reach
+        # tanh() reaches exactly 1.0 in float64, which would put the value
+        # back precisely on the limit — reintroducing the point mass this
+        # function exists to remove. Asymptote just inside instead.
+        u = sign * (k + (1.0 - k) * (1.0 - 1e-6) * math.tanh(over / (1.0 - k)))
+    return float(center + u * half)
+
+
+_JOINT_LABELS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'joint7']
 
 
 class ExoRetargetingNode(Node):
@@ -62,6 +101,13 @@ class ExoRetargetingNode(Node):
         self.robot_type = self.get_parameter('robot_type').value
         self.enable_left_arm_retargeting = self.get_parameter('enable_left_arm_retargeting').value
         self.enable_right_arm_retargeting = self.get_parameter('enable_right_arm_retargeting').value
+
+        # 限位饱和统计（每个 arm/joint 累计次数与最大超出量）
+        # Saturation bookkeeping: {(arm, joint_idx): [count, max_overshoot]}.
+        # Without this the operator has no way to know a joint is railing —
+        # clipping is silent and only shows up later as corrupted training data.
+        self._sat_stats: Dict[Tuple[str, int], List[float]] = {}
+        self._sat_last_warn = 0.0
         
         # 根据机器人类型自动构造配置文件路径
         self._setup_config_file_path()
@@ -570,18 +616,80 @@ class ExoRetargetingNode(Node):
                 transformed[5] = -j7
                 transformed[6] = j6
 
+        # 输出增益（可选）：在限位之前缩小行程，用于把操作者的活动范围压进
+        # 关节硬限位内。主要用于腕部 joint6（±45°，是机械限位最窄的关节）。
+        # Optional per-joint output gain, applied about the limit mid-point so
+        # it also behaves sensibly on asymmetric joints. Default 1.0 = no-op.
+        gain_cfg = params.get('output_gain', {})
+        gains = gain_cfg.get(arm_side, [1.0] * 7) if isinstance(gain_cfg, dict) else [1.0] * 7
+
+        # 限位模式：hard = 直接截断（旧行为）；soft = 平滑压缩，永不贴死限位
+        limit_mode = str(params.get('limit_mode', 'hard')).lower()
+        soft_knee = float(params.get('soft_limit_knee', 0.85))
+
         # 应用关节限位 - 支持新的左右臂分离结构
         if arm_side in joint_limits:
             arm_limits = joint_limits[arm_side]
             for i in range(start_idx, 7):
                 lower_limit = arm_limits['lower'][i]
                 upper_limit = arm_limits['upper'][i]
-                retargeted[i] = float(np.clip(transformed[i], lower_limit, upper_limit))
+
+                value = transformed[i]
+                gain = float(gains[i]) if i < len(gains) else 1.0
+                if gain != 1.0:
+                    center = 0.5 * (lower_limit + upper_limit)
+                    value = center + (value - center) * gain
+
+                # 记录“原始指令是否已超出硬限位”，用于录制期告警。
+                # Record whether the *pre-limit* command exceeded the hard
+                # limit. This is the signal that would otherwise be invisible:
+                # np.clip silently writes the limit value into the dataset.
+                overshoot = 0.0
+                if value < lower_limit:
+                    overshoot = lower_limit - value
+                elif value > upper_limit:
+                    overshoot = value - upper_limit
+                if overshoot > 0.0:
+                    self._note_saturation(arm_side, i, overshoot)
+
+                if limit_mode == 'soft':
+                    retargeted[i] = _soft_limit(value, lower_limit, upper_limit, soft_knee)
+                else:
+                    retargeted[i] = float(np.clip(value, lower_limit, upper_limit))
         else:
             raise RuntimeError("joint_limits 配置格式错误：未找到对应的左右臂分离结构，请检查配置文件。")
-        
+
         return retargeted
     
+    def _note_saturation(self, arm_side: str, joint_idx: int, overshoot: float) -> None:
+        """
+        记录一次限位饱和，并按节流频率告警。
+
+        Recording a saturated joint is the whole point: np.clip would otherwise
+        write the limit value into the dataset with no trace, and the damage
+        only surfaces much later as a policy that cannot predict that joint.
+        Warnings are throttled to once every 2 s so a sustained over-reach does
+        not flood the log.
+        """
+        key = (arm_side, joint_idx)
+        stat = self._sat_stats.setdefault(key, [0.0, 0.0])
+        stat[0] += 1
+        stat[1] = max(stat[1], overshoot)
+
+        now = time.monotonic()
+        if now - self._sat_last_warn < 2.0:
+            return
+        self._sat_last_warn = now
+
+        label = _JOINT_LABELS[joint_idx] if joint_idx < len(_JOINT_LABELS) else f'idx{joint_idx}'
+        self.get_logger().warn(
+            f'⚠️  限位饱和 SATURATED: {arm_side}/{label} '
+            f'超出 {math.degrees(overshoot):.1f}° beyond its limit '
+            f'({int(stat[0])} samples so far). '
+            f'Recorded data for this joint is being clipped — adjust your pose, '
+            f'or set retargeting_params.output_gain / limit_mode: soft.'
+        )
+
     def publish_left_arm_command(self, joint_positions: List[float], gripper_position: float, timestamp):
         """发布左臂关节命令"""
         try:

@@ -135,6 +135,12 @@ const Recording = () => {
   const [leftArmFixed, setLeftArmFixed] = useState(false);
   const [rightArmFixed, setRightArmFixed] = useState(false);
   const [isTriggeringHome, setIsTriggeringHome] = useState(false);
+  // Session ("persistent") locks are a separate concept from the transient
+  // lock above: they survive episode boundaries and veto the recorder's
+  // auto-unlock for that arm.
+  const [leftSessionLock, setLeftSessionLock] = useState(false);
+  const [rightSessionLock, setRightSessionLock] = useState(false);
+  const [sessionLockInit, setSessionLockInit] = useState(false);
   const prevRealPhaseRef = useRef<Phase | null>(null);
   // Bumps on each re-record so the auto-advance warning re-fires for the same episode number.
   const [rerecordTick, setRerecordTick] = useState(0);
@@ -192,38 +198,63 @@ const Recording = () => {
     }
   };
 
-  const handleToggleLeftArm = async () => {
-    const nextState = !leftArmFixed;
-    setLeftArmFixed(nextState);
+  // Transient lock: park this arm at home right now. Deliberately does NOT
+  // touch the persistent (session) lock — those were previously set together,
+  // which meant any momentary lock also installed a session-long veto on the
+  // recorder's auto-unlock. They are separate controls now.
+  const setArmLocked = async (arm: "left" | "right", locked: boolean) => {
+    if (arm === "left") setLeftArmFixed(locked);
+    else setRightArmFixed(locked);
     try {
-      await fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, {
+      await fetchWithHeaders(`${baseUrl}/toggle-${arm}-arm-home`, {
         method: "POST",
-        body: JSON.stringify({ fixed: nextState }),
-      });
-      await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
-        method: "POST",
-        body: JSON.stringify({ arm: "left", locked: nextState }),
+        body: JSON.stringify({ fixed: locked }),
       });
     } catch (e) {
       console.error(e);
     }
   };
 
-  const handleToggleRightArm = async () => {
-    const nextState = !rightArmFixed;
-    setRightArmFixed(nextState);
+  // Session lock: "keep this arm locked even once recording starts". This is
+  // the flag the recorder checks before auto-unlocking:
+  //   unlock_right = arm_mode in ("both","right") and not persistent_right_lock
+  const setArmSessionLock = async (arm: "left" | "right", locked: boolean) => {
+    if (arm === "left") setLeftSessionLock(locked);
+    else setRightSessionLock(locked);
     try {
-      await fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, {
-        method: "POST",
-        body: JSON.stringify({ fixed: nextState }),
-      });
       await fetchWithHeaders(`${baseUrl}/set-persistent-lock`, {
         method: "POST",
-        body: JSON.stringify({ arm: "right", locked: nextState }),
+        body: JSON.stringify({ arm, locked }),
       });
+      // A session lock should take effect immediately, not only at the next
+      // episode boundary; and releasing it should hand the arm back.
+      await setArmLocked(arm, locked);
     } catch (e) {
       console.error(e);
     }
+  };
+
+  // Default session locks from arm_mode: lock whichever arm is NOT being
+  // recorded, so it stays parked for the whole session instead of drifting
+  // with the operator. "both" locks neither. Runs once; the buttons below can
+  // still override either arm at any point, including mid-recording.
+  useEffect(() => {
+    if (sessionLockInit || !recordingConfig) return;
+    const mode = recordingConfig.arm_mode ?? "both";
+    const wantLeft = mode === "right";   // recording right -> park left
+    const wantRight = mode === "left";   // recording left  -> park right
+    setSessionLockInit(true);
+    if (wantLeft) setArmSessionLock("left", true);
+    if (wantRight) setArmSessionLock("right", true);
+  }, [recordingConfig, sessionLockInit]);
+
+  const handleToggleLeftArm = () => setArmLocked("left", !leftArmFixed);
+  const handleToggleRightArm = () => setArmLocked("right", !rightArmFixed);
+  const handleToggleBothArms = () => {
+    // "B" reflects the pair: if either is unlocked, lock both; else release both.
+    const next = !(leftArmFixed && rightArmFixed);
+    setArmLocked("left", next);
+    setArmLocked("right", next);
   };
 
   const handleTriggerHome = async () => {
@@ -963,21 +994,70 @@ const Recording = () => {
           <div className="mb-8 p-4 bg-gray-800/50 rounded-xl border border-gray-700">
             <div className="text-sm text-gray-400 mb-2 font-semibold">Arm Homing Controls</div>
             <div className="flex flex-col gap-3">
-              <div className="flex gap-4">
-                <Button 
-                  onClick={handleToggleLeftArm} 
-                  variant={leftArmFixed ? "default" : "secondary"}
-                  className={`flex-1 ${leftArmFixed ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
-                >
-                  {leftArmFixed ? "Unlock Left Arm" : "Lock Left to Home"}
-                </Button>
-                <Button 
-                  onClick={handleToggleRightArm} 
-                  variant={rightArmFixed ? "default" : "secondary"}
-                  className={`flex-1 ${rightArmFixed ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'}`}
-                >
-                  {rightArmFixed ? "Unlock Right Arm" : "Lock Right to Home"}
-                </Button>
+              {/* Row 1: transient lock. Lit = that arm is currently held at home. */}
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 w-14 shrink-0">Lock</span>
+                {([
+                  { key: "L", lit: leftArmFixed, onClick: handleToggleLeftArm,
+                    title: leftArmFixed ? "Left arm locked to home — click to release" : "Lock left arm to home" },
+                  { key: "R", lit: rightArmFixed, onClick: handleToggleRightArm,
+                    title: rightArmFixed ? "Right arm locked to home — click to release" : "Lock right arm to home" },
+                  { key: "B", lit: leftArmFixed && rightArmFixed, onClick: handleToggleBothArms,
+                    title: leftArmFixed && rightArmFixed ? "Both arms locked — click to release both" : "Lock both arms to home" },
+                ] as const).map((b) => (
+                  <Button
+                    key={b.key}
+                    onClick={b.onClick}
+                    title={b.title}
+                    aria-pressed={b.lit}
+                    variant={b.lit ? "default" : "secondary"}
+                    className={`w-12 h-10 p-0 font-bold text-base transition-colors ${
+                      b.lit
+                        ? "bg-blue-500 hover:bg-blue-400 text-white ring-2 ring-blue-300 shadow-lg shadow-blue-500/40"
+                        : "bg-gray-700 hover:bg-gray-600 text-gray-400"
+                    }`}
+                  >
+                    {b.key}
+                  </Button>
+                ))}
+                <span className="text-xs text-gray-500 ml-1">
+                  {leftArmFixed || rightArmFixed
+                    ? `locked: ${[leftArmFixed && "L", rightArmFixed && "R"].filter(Boolean).join(" ")}`
+                    : "both following exoskeleton"}
+                </span>
+              </div>
+
+              {/* Row 2: session lock. Survives episode boundaries and vetoes the
+                  recorder's auto-unlock, so an arm you are not recording stays
+                  parked for the whole run. Defaults from arm_mode above. */}
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 w-14 shrink-0">Session</span>
+                {([
+                  { key: "L", lit: leftSessionLock, arm: "left" as const },
+                  { key: "R", lit: rightSessionLock, arm: "right" as const },
+                ]).map((b) => (
+                  <Button
+                    key={b.key}
+                    onClick={() => setArmSessionLock(b.arm, !b.lit)}
+                    aria-pressed={b.lit}
+                    title={b.lit
+                      ? `${b.arm} arm stays locked for the whole session — click to release`
+                      : `Keep ${b.arm} arm locked for the whole session`}
+                    variant={b.lit ? "default" : "secondary"}
+                    className={`w-12 h-10 p-0 font-bold text-base transition-colors ${
+                      b.lit
+                        ? "bg-amber-500 hover:bg-amber-400 text-black ring-2 ring-amber-300 shadow-lg shadow-amber-500/40"
+                        : "bg-gray-700 hover:bg-gray-600 text-gray-400"
+                    }`}
+                  >
+                    {b.key}
+                  </Button>
+                ))}
+                <span className="text-xs text-gray-500 ml-1">
+                  {leftSessionLock || rightSessionLock
+                    ? `held all session: ${[leftSessionLock && "L", rightSessionLock && "R"].filter(Boolean).join(" ")}`
+                    : "no arm held across episodes"}
+                </span>
               </div>
               <Button 
                 onClick={handleTriggerHome} 

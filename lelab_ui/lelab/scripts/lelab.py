@@ -42,17 +42,27 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 FRONTEND_PATH = PROJECT_ROOT / "frontend"
 FRONTEND_DIST = FRONTEND_PATH / "dist"
-BACKEND_PORT = 8000
+# Defaults; `main()` overrides both from --host/--port. Binding 0.0.0.0 rather
+# than 127.0.0.1 is what makes the UI reachable from other machines on the LAN.
+# LELAB_PORT is preferred over the bare PORT, which collides with a very common
+# ambient convention; PORT stays supported for backwards compatibility.
+BACKEND_HOST = os.environ.get("LELAB_HOST", "0.0.0.0")
+BACKEND_PORT = int(os.environ.get("LELAB_PORT") or os.environ.get("PORT") or 8000)
 FRONTEND_DEV_PORT = 8080
+
+
+def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
+    """True if a TCP connection to host:port succeeds within `timeout`."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _wait_for_port(port: int, timeout: int = 30) -> bool:
     for _ in range(timeout):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
-        result = sock.connect_ex(("localhost", port))
-        sock.close()
-        if result == 0:
+        if _port_open(port, host="localhost"):
             return True
         time.sleep(1)
     return False
@@ -61,15 +71,18 @@ def _wait_for_port(port: int, timeout: int = 30) -> bool:
 def _open_browser_when_ready():
     """Background-thread helper: poll the port, open the browser when up."""
     for _ in range(60):
-        try:
-            with socket.create_connection(("127.0.0.1", BACKEND_PORT), timeout=0.5):
-                pass
-        except OSError:
+        if not _port_open(BACKEND_PORT, timeout=0.5):
             time.sleep(0.5)
             continue
         logger.info("🌐 Opening browser...")
         webbrowser.open(f"http://localhost:{BACKEND_PORT}/")
         return
+
+
+def _already_running() -> bool:
+    """True if an earlier leLab instance is already answering on BACKEND_PORT,
+    so we can reuse it instead of starting a duplicate / reopening a tab."""
+    return _port_open(BACKEND_PORT, timeout=0.5)
 
 
 def _run_prod():
@@ -79,6 +92,13 @@ def _run_prod():
         logger.error("   Run `npm run build` in frontend/ first, or use `lelab --dev`.")
         sys.exit(1)
 
+    if _already_running():
+        logger.info(
+            "✅ LeLab is already running on http://localhost:%d — reusing it, not opening a new tab.",
+            BACKEND_PORT,
+        )
+        return
+
     logger.info("🚀 Starting LeLab on http://localhost:%d ...", BACKEND_PORT)
 
     threading.Thread(target=_open_browser_when_ready, daemon=True).start()
@@ -87,7 +107,7 @@ def _run_prod():
     # and bound graceful shutdown so a stuck WebSocket can't hang Ctrl+C.
     uvicorn.run(
         "lelab.server:app",
-        host="127.0.0.1",
+        host=BACKEND_HOST,
         port=BACKEND_PORT,
         log_level="info",
         reload=False,
@@ -126,7 +146,7 @@ def _run_dev():
             "uvicorn",
             "lelab.server:app",
             "--host",
-            "127.0.0.1",
+            BACKEND_HOST,
             "--port",
             str(BACKEND_PORT),
             "--reload",
@@ -182,13 +202,30 @@ def _run_dev():
 
 
 def main():
+    # The run helpers and the browser-opener thread read these module-level
+    # values, so --host/--port are applied by rebinding them here rather than
+    # threading two more parameters through each function.
+    global BACKEND_HOST, BACKEND_PORT
+
     parser = argparse.ArgumentParser(prog="lelab", description="Run LeLab")
     parser.add_argument(
         "--dev",
         action="store_true",
         help="Dev mode: Vite HMR + uvicorn --reload (requires Node.js)",
     )
+    parser.add_argument(
+        "--host",
+        default=BACKEND_HOST,
+        help=f"Address to bind (default: {BACKEND_HOST}; env: LELAB_HOST)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=BACKEND_PORT,
+        help=f"Port to serve on (default: {BACKEND_PORT}; env: LELAB_PORT)",
+    )
     args = parser.parse_args()
+    BACKEND_HOST, BACKEND_PORT = args.host, args.port
 
     if args.dev:
         _run_dev()

@@ -47,8 +47,23 @@ exo_joint_mapping:
     # close_deadzone: 小于该归一化阈值时强制吸附到0.0，避免夹爪留缝
     open_value: 0.067
     close_value: 0.0025
-    close_deadzone: 0.06
-    open_deadzone: 0.00
+    # Deadzones widened to make the gripper reach FULL close/open earlier in
+    # the trigger travel, i.e. faster open->closed for the same hand speed.
+    #
+    # The trigger mapping is memoryless (no smoothing/rate limit), so recorded
+    # gripper speed is purely how fast the operator squeezes — the only
+    # software lever is where the endpoints snap. Measured on
+    # Pick_Drop_v2_20260810_074522: 79% of frames were already at an endpoint
+    # and the useful travel was almost entirely in (0,0.10] and (0.90,1.0),
+    # i.e. the mid-range carried almost no information. Widening the snap
+    # zones turns a slow ramp into a crisp transition, which is also easier
+    # for a policy to learn than a long ambiguous middle.
+    #
+    # Trade-off: this removes fine partial-aperture control. Fine for rigid
+    # packets; reduce both values if you need to grasp delicate objects with
+    # a deliberately partial opening.
+    close_deadzone: 0.15
+    open_deadzone: 0.10
 
 # 目标机器人（OpenArm）关节名称（URDF）
 # OpenArm使用7自由度手臂：joint1-joint7
@@ -118,6 +133,36 @@ retargeting_params:
       # joint2有offset=pi/2 (90度)
       lower: [-1.396263, -0.174533, -1.570796,  0.0,      -1.570796, -0.785398, -1.570796]
       upper: [ 3.490659,  3.316125,  1.570796,  2.443461,  1.570796,  0.785398,  1.570796]
+
+  # ---------------------------------------------------------------------
+  # 限位处理 / Limit handling  —  防止录制数据出现"贴死限位"的脏样本
+  #
+  # hard: 直接 np.clip 截断（旧行为）。超程时会把限位值原样写进数据集。
+  # soft: 在 soft_limit_knee 以内完全线性（手感不变），超过后平滑压缩，
+  #       渐近但永不贴死限位。
+  #
+  # Why this is set to `soft`: joint6 has the narrowest mechanical range on
+  # the arm (+/-45deg, half of joint5/joint7). With hard clipping, any
+  # over-reach wrote exactly +/-0.785398 into the recorded action. In the
+  # Pick_Drop_500 dataset that produced a point mass at the rail in 77 of 500
+  # episodes (up to 49% of the frames in one), which a policy learns as a
+  # confident scene-independent label and cannot then predict on clean data.
+  #
+  # Within `soft_limit_knee` (85% of the half-range) the mapping is the
+  # identity, so normal teleop feel is unchanged; only over-reach is affected,
+  # and there the arm moves *less* than commanded, never more.
+  limit_mode: soft
+  soft_limit_knee: 0.85
+
+  # 输出增益（限位之前，绕限位中点缩放）/ per-joint output gain, applied about
+  # the limit mid-point before limiting. 1.0 = no change.
+  # Use this if the saturation warnings show a joint is *persistently* being
+  # over-driven — reducing its gain compresses the operator's whole range into
+  # the joint's envelope instead of relying on the soft limiter's outer band.
+  # Tune from the warning output (it reports how many degrees past the limit).
+  output_gain:
+    left_arm:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    right_arm: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
   smoothing:
     enable: true

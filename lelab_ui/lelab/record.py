@@ -1555,6 +1555,8 @@ def custom_record_loop(
         return bool(getattr(robot, "_camera_frozen", None)) and any(robot._camera_frozen.values())
 
     events["_is_homing"] = False
+    events["_homing_resend_gave_up"] = False
+    events["_homing_operator_override"] = False
     # A pause (manual button-B toggle, or an auto camera-freeze pause) must not
     # leak into the next phase.  Without this, a pause left active when this
     # phase's control_time_s naturally elapsed (or exit_early broke out of it)
@@ -1708,9 +1710,44 @@ def custom_record_loop(
             # is frozen by a camera-freeze auto-pause.
             elapsed_homing = time.perf_counter() - events.get("_homing_start_time", time.perf_counter())
 
-            # Re-send home command every ~1s to guard against ROS message drops
+            # The operator manually released an arm during homing (Lock L/R in
+            # the UI). Treat that as "homing is over": the arm is deliberately
+            # following the exoskeleton again, so it will never reach the home
+            # target and waiting for it would hang the episode forever.
+            if events.get("_homing_operator_override"):
+                logger.info("Operator released an arm during homing; ending the homing phase.")
+                print("\n✋ Manual release during homing. Ending episode.")
+                events["_is_homing"] = False
+                events["_home_reached"] = True
+                current_phase = "saving"
+                phase_start_time = time.time()
+                break
+
+            # Re-send home command every ~1s to guard against ROS message drops.
+            #
+            # BOUNDED: every re-send carries lock_all=True, so an unbounded loop
+            # keeps re-locking the arm for as long as `is_home` stays false —
+            # which is exactly the "recording started but the arm is still
+            # locked" symptom. After _HOMING_RESEND_LIMIT_S we stop re-asserting
+            # the lock and let the operator take over, rather than pinning the
+            # arm indefinitely because one joint sits a hair outside tolerance.
+            _HOMING_RESEND_LIMIT_S = 10.0
             last_home_cmd_time = events.get("_last_home_cmd_time", 0.0)
-            if time.perf_counter() - last_home_cmd_time > 1.0:
+            if elapsed_homing > _HOMING_RESEND_LIMIT_S:
+                if not events.get("_homing_resend_gave_up"):
+                    events["_homing_resend_gave_up"] = True
+                    logger.warning(
+                        "Homing did not confirm within %.0fs; stopping the lock_all re-send so "
+                        "the arm is not held locked. Releasing arms for teleoperation.",
+                        _HOMING_RESEND_LIMIT_S,
+                    )
+                    # Actively release, otherwise the last lock_all we sent stands.
+                    arm_mode_r = events.get("_arm_mode", "both")
+                    if arm_mode_r in ("both", "left") and not events.get("persistent_left_lock", False):
+                        _send_ui_command({"action": "toggle_left_home", "value": False})
+                    if arm_mode_r in ("both", "right") and not events.get("persistent_right_lock", False):
+                        _send_ui_command({"action": "toggle_right_home", "value": False})
+            elif time.perf_counter() - last_home_cmd_time > 1.0:
                 try:
                     if target_state is not None:
                         if len(target_state) == 16:
@@ -1754,7 +1791,14 @@ def custom_record_loop(
                 is_home = bool(pairs)
                 if is_home:
                     for ci, ti in pairs:
-                        tol = 0.005 if ci in (7, 15) else 0.15  # 5mm for grippers, 0.15 rad for joints
+                        # 5mm on the gripper. Kept tight deliberately: the gripper's
+                        # full travel is only ~44mm, so a looser tolerance would let
+                        # homing "confirm" with the gripper a third of its range open
+                        # and bake an imprecise home pose into the recording. The
+                        # stuck-lock failure was never this check — it was the
+                        # unbounded lock_all re-send (bounded below) and the homing
+                        # latch in the bridge, both fixed at source.
+                        tol = 0.005 if ci in (7, 15) else 0.15
                         if abs(current_state[ci] - target_state[ti]) > tol:
                             is_home = False
                             break
