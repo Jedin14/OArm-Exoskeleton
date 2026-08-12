@@ -408,7 +408,14 @@ const Landing = () => {
                 onClick={handleTrainingClick}
                 className="w-full bg-cyan-600 hover:bg-cyan-500 text-white text-lg py-6 shadow-md shadow-cyan-500/20"
               >
-                Configure ROS Cameras
+                Manage Cameras
+              </Button>
+              <Button
+                onClick={() => navigate("/io-config")}
+                variant="secondary"
+                className="w-full bg-gray-700 hover:bg-gray-600 text-gray-200"
+              >
+                I/O Configuration
               </Button>
             </div>
           </div>

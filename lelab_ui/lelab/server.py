@@ -733,24 +733,23 @@ def recording_toggle_pause():
 
 @app.post("/toggle-left-arm-home")
 def toggle_left_arm_home(req: ToggleArmHomeRequest):
-    import subprocess
-    import json
-    import os
-    cmd_str = json.dumps({"action": "toggle_left_home", "value": req.fixed})
-    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
-    subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+    # In-process publisher, NOT subprocess. The subprocess path costs 2-3s of
+    # interpreter startup before the message is actually published, while the
+    # recorder's own lock/unlock commands go out instantly. That skew is what
+    # let the UI's end-of-episode lock (sent as the recording phase ended) land
+    # AFTER the next episode's unlock, leaving the arm locked at the start of a
+    # recording with nothing to clear it. _send_ui_command still falls back to
+    # the subprocess if ROS is unavailable in this process.
+    from lelab.record import _send_ui_command
+    _send_ui_command({"action": "toggle_left_home", "value": req.fixed})
     if not req.fixed:
         _operator_took_over("left")
     return {"success": True}
 
 @app.post("/toggle-right-arm-home")
 def toggle_right_arm_home(req: ToggleArmHomeRequest):
-    import subprocess
-    import json
-    import os
-    cmd_str = json.dumps({"action": "toggle_right_home", "value": req.fixed})
-    script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
-    subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
+    from lelab.record import _send_ui_command
+    _send_ui_command({"action": "toggle_right_home", "value": req.fixed})
     if not req.fixed:
         _operator_took_over("right")
     return {"success": True}
@@ -809,6 +808,103 @@ def _operator_took_over(arm: str) -> None:
         recording_events["_homing_operator_override"] = True
         logger.info("Operator manually released the %s arm during homing; "
                     "cancelling the automatic re-lock.", arm)
+
+
+# ---------------------------------------------------------------------------
+# I/O configuration (persisted so openarm_teleop.sh picks it up on restart)
+# ---------------------------------------------------------------------------
+
+IO_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "lelab", "io_config.json")
+IO_CONFIG_DEFAULTS = {"ros_camera": False}
+
+
+def _read_io_config() -> dict:
+    cfg = dict(IO_CONFIG_DEFAULTS)
+    try:
+        with open(IO_CONFIG_PATH) as fh:
+            cfg.update({k: v for k, v in json.load(fh).items() if k in IO_CONFIG_DEFAULTS})
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning("io_config unreadable (%s); using defaults", e)
+    return cfg
+
+
+def _write_io_config(**changes) -> dict:
+    """Persist I/O settings atomically and return the new config.
+
+    Shared by the I/O page and the Camera Setup bridge buttons so those two can
+    never disagree about whether the ROS camera bridge is wanted.
+    """
+    os.makedirs(os.path.dirname(IO_CONFIG_PATH), exist_ok=True)
+    cfg = _read_io_config()
+    for key, value in changes.items():
+        if key in IO_CONFIG_DEFAULTS:
+            cfg[key] = value
+    tmp = IO_CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(cfg, fh, indent=1)
+    os.replace(tmp, IO_CONFIG_PATH)   # atomic: never leave a half-written config
+    logger.info("io_config updated: %s", cfg)
+    return cfg
+
+
+def _camera_bridge_pids() -> list[int]:
+    import subprocess as _sp
+    try:
+        out = _sp.run(
+            ["pgrep", "-f", "openarm_camera_bridge_node.py"],
+            capture_output=True, text=True,
+        ).stdout
+    except Exception as e:
+        logger.warning("pgrep for camera bridge failed: %s", e)
+        return []
+    return [int(p) for p in out.split() if p.isdigit()]
+
+
+class IOConfigRequest(BaseModel):
+    ros_camera: bool
+
+
+@app.get("/io-config")
+def get_io_config():
+    """
+    Current I/O settings plus whether they match the running processes.
+
+    `requires_restart` is the point of this endpoint: these settings are read by
+    openarm_teleop.sh at launch, so toggling one changes nothing until teleop is
+    restarted. Reporting the live state lets the UI say so instead of implying
+    the change took effect.
+    """
+    cfg = _read_io_config()
+    running = bool(_camera_bridge_pids())
+    return {
+        "status": "success",
+        **cfg,
+        "ros_camera_running": running,
+        "requires_restart": bool(cfg["ros_camera"]) != running,
+    }
+
+
+@app.post("/io-config")
+def set_io_config(req: IOConfigRequest):
+    """
+    Persist I/O settings. Takes effect on the next teleop restart.
+
+    ROS camera bridge OFF is the default: it JPEG-encodes and republishes each
+    frame, while deployment reads cameras directly with cv2.VideoCapture, so
+    recording through it trains the policy on compression artifacts and latency
+    it never sees at run time. V4L2 devices are exclusive too, so the bridge and
+    the direct reader cannot both hold a camera.
+    """
+    cfg = _write_io_config(ros_camera=bool(req.ros_camera))
+    running = bool(_camera_bridge_pids())
+    return {
+        "status": "success",
+        **cfg,
+        "ros_camera_running": running,
+        "requires_restart": bool(cfg["ros_camera"]) != running,
+    }
 
 
 @app.post("/set-persistent-lock")
@@ -899,17 +995,53 @@ def get_recording_camera(cam_name: str):
 
 @app.post("/reconnect-cameras")
 def reconnect_cameras():
-    """Reconnect all cameras to recover from hardware freezes"""
+    """Reconnect all cameras to recover from a freeze, mid-recording included.
+
+    Reports which cameras actually resumed. This used to return success
+    unconditionally, so a reconnect that recovered nothing still said "Cameras
+    reconnected" — the worst possible answer while an operator is trying to save
+    a run. Backends whose reconnect_cameras() returns None keep the old
+    behaviour, since there is nothing to verify against.
+    """
     from lelab.record import active_robot, recording_active
-    
+
     if not recording_active or not active_robot:
         return {"success": False, "message": "Recording not active"}
-        
-    if hasattr(active_robot, "reconnect_cameras"):
-        active_robot.reconnect_cameras()
-        return {"success": True, "message": "Cameras reconnected"}
-    
-    return {"success": False, "message": "Robot does not support camera reconnection"}
+
+    if not hasattr(active_robot, "reconnect_cameras"):
+        return {"success": False, "message": "Robot does not support camera reconnection"}
+
+    try:
+        results = active_robot.reconnect_cameras()
+    except Exception as e:
+        logger.error("camera reconnect raised: %s", e)
+        return {"success": False, "message": f"Reconnect failed: {e}"}
+
+    if not isinstance(results, dict) or not results:
+        return {"success": True, "message": "Cameras reconnected", "cameras": {}}
+
+    recovered = sorted(k for k, ok in results.items() if ok)
+    failed = sorted(k for k, ok in results.items() if not ok)
+    if failed:
+        return {
+            "success": False,
+            "message": (
+                f"{', '.join(failed)} still not delivering frames"
+                + (f" (recovered: {', '.join(recovered)})" if recovered else "")
+                + ". Check the USB connection, then re-attach the camera on the "
+                "Camera Setup page to point the slot at its new device."
+            ),
+            "cameras": results,
+            "recovered": recovered,
+            "failed": failed,
+        }
+    return {
+        "success": True,
+        "message": f"Reconnected: {', '.join(recovered)}",
+        "cameras": results,
+        "recovered": recovered,
+        "failed": [],
+    }
 
 
 def _is_capture_node(dev_path: str) -> bool:
@@ -1783,6 +1915,13 @@ import subprocess as _subprocess
 _ROS_CAMERA_MAPPINGS_PATH = Path.home() / ".config" / "lelab" / "ros_camera_mappings.json"
 _bridge_proc: _subprocess.Popen | None = None
 _bridge_proc_lock = threading.Lock()
+# Bridge's own stdout/stderr. A crash AFTER the startup check used to be
+# invisible: output went to a subprocess.PIPE nobody drained, so once the
+# bridge exited there was no way to see why -- exactly the situation of a
+# bridge that died mid-session with a stale PID still shown in the UI. A file
+# survives the process exiting and can be read at any time, not just in the
+# few seconds after Popen.
+_BRIDGE_LOG_PATH = Path("/tmp/lelab_camera_bridge.log")
 
 
 class RosCameraMappingEntry(BaseModel):
@@ -1807,10 +1946,49 @@ def _save_ros_camera_mappings(mappings: list[dict]) -> None:
     _ROS_CAMERA_MAPPINGS_PATH.write_text(json.dumps(mappings, indent=2))
 
 
+def _stable_device_path(device_index) -> str | None:
+    """Best /dev/v4l/by-path symlink for a camera, or None.
+
+    /dev/videoN is assigned in enumeration order and moves when cables move or
+    another camera is plugged in first (observed here: a USB camera went video4
+    -> video10). by-path is stable per USB port, so mappings persist that and
+    both readers re-resolve it at open time.
+    """
+    import glob as _glob
+
+    s = str(device_index)
+    target = s if s.startswith("/dev/video") else f"/dev/video{s}" if s.isdigit() else None
+    if target is None:
+        return s if s.startswith("/dev/v4l/by-path/") else None
+    real = os.path.realpath(target)
+    for link in _glob.glob("/dev/v4l/by-path/*"):
+        if os.path.realpath(link) == real:
+            return link
+    return None
+
+
+def _annotate_mappings(mappings: list[dict]) -> list[dict]:
+    """Add live device info so the UI can show a real status without a bridge.
+
+    In direct-capture mode nothing is streaming until a recording starts, so
+    "does this device still exist" is the only honest readiness signal we can
+    give beforehand.
+    """
+    out = []
+    for m in mappings:
+        entry = dict(m)
+        dev = str(m.get("device_index"))
+        path = dev if dev.startswith("/dev/") else f"/dev/video{dev}" if dev.isdigit() else dev
+        entry["resolved_path"] = os.path.realpath(path) if path.startswith("/dev/") else path
+        entry["device_present"] = os.path.exists(path)
+        out.append(entry)
+    return out
+
+
 @app.get("/ros-camera-mappings")
 def get_ros_camera_mappings():
-    """Return the persisted ROS camera→USB device mappings."""
-    return {"mappings": _load_ros_camera_mappings()}
+    """Return the persisted camera→USB device mappings, with live device info."""
+    return {"mappings": _annotate_mappings(_load_ros_camera_mappings())}
 
 
 @app.post("/ros-camera-mappings")
@@ -1819,12 +1997,19 @@ def add_ros_camera_mapping(entry: RosCameraMappingEntry):
     VALID_NAMES = {"main_camera", "right_camera", "left_camera"}
     if entry.name not in VALID_NAMES:
         raise HTTPException(status_code=400, detail=f"name must be one of {VALID_NAMES}")
+    record = entry.model_dump()
+    # Persist the port-stable path when we can find one; a bare index recorded
+    # today points at a different camera after the next replug.
+    stable = _stable_device_path(entry.device_index)
+    if stable:
+        record["device_index"] = stable
+        logger.info("camera %s: pinned %s -> %s", entry.name, entry.device_index, stable)
     mappings = _load_ros_camera_mappings()
     # Replace if name already exists
     mappings = [m for m in mappings if m["name"] != entry.name]
-    mappings.append(entry.model_dump())
+    mappings.append(record)
     _save_ros_camera_mappings(mappings)
-    return {"success": True, "mappings": mappings}
+    return {"success": True, "mappings": _annotate_mappings(mappings)}
 
 
 @app.delete("/ros-camera-mappings/{name}")
@@ -1833,7 +2018,7 @@ def delete_ros_camera_mapping(name: str):
     mappings = _load_ros_camera_mappings()
     mappings = [m for m in mappings if m["name"] != name]
     _save_ros_camera_mappings(mappings)
-    return {"success": True, "mappings": mappings}
+    return {"success": True, "mappings": _annotate_mappings(mappings)}
 
 
 @app.get("/ros-camera-status")
@@ -1848,55 +2033,186 @@ def get_ros_camera_status():
         return {"status": {}}
 
 
+def _tail_bridge_log(n: int = 20) -> list[str]:
+    try:
+        lines = _BRIDGE_LOG_PATH.read_text(errors="replace").splitlines()
+    except FileNotFoundError:
+        return []
+    return lines[-n:]
+
+
+@app.get("/ros-camera-bridge/log")
+def get_ros_camera_bridge_log(lines: int = 40):
+    """Tail the bridge's own log, including any crash that happened after it
+    was already confirmed running (a startup failure is reported inline by
+    /ros-camera-bridge/start; this is for a bridge that died later, mid-session,
+    which the start response can never see)."""
+    return {"log": _tail_bridge_log(lines), "path": str(_BRIDGE_LOG_PATH)}
+
+
 @app.post("/ros-camera-bridge/start")
 def start_ros_camera_bridge():
-    """Launch the openarm_camera_bridge_node.py ROS 2 node as a subprocess.
-    Kills any existing instances first (e.g., those spawned by the bash script)."""
+    """Launch openarm_camera_bridge_node.py, and report whether it SURVIVED.
+
+    Refuses outright unless ROS camera mode is enabled on the I/O Configuration
+    page. That page is meant to be the one place deciding record vs. ROS camera
+    capture; this endpoint used to start the bridge unconditionally and then
+    persist ros_camera=True as a side effect, which is how the bridge ended up
+    running with nobody having deliberately turned ROS camera mode on. Direct
+    capture needs no "start" step at all — recording just opens the devices —
+    so there is nothing for this button to do while that mode is off.
+
+    The previous version also returned success as soon as Popen returned. The
+    bridge exits immediately on a bad setup — no camera mappings, a device
+    already held by something else — so the UI reported "Started (PID n)" for a
+    process that was already dead, and the status dot then said "not running"
+    with no reason given. It now waits, confirms the process is alive, and hands
+    back the child's own output when it is not.
+    """
     global _bridge_proc
+    import time
+
     with _bridge_proc_lock:
+        if not _read_io_config().get("ros_camera", False):
+            raise HTTPException(
+                status_code=400,
+                detail="ROS camera mode is disabled on the I/O Configuration page. "
+                       "Enable it there first — direct capture needs no bridge and "
+                       "is already active.",
+            )
+
         # Kill any existing bridge processes to avoid camera locks and JSON conflicts
         _subprocess.run(["pkill", "-f", "openarm_camera_bridge_node.py"])
-        import time
         time.sleep(0.2)
-        
+
         bridge_script = Path(__file__).parent.parent.parent / "src" / "qnbot_teleoperator" / "scripts" / "openarm_camera_bridge_node.py"
         if not bridge_script.is_file():
             raise HTTPException(status_code=404, detail=f"Bridge script not found: {bridge_script}")
-            
+
+        if not _load_ros_camera_mappings():
+            raise HTTPException(
+                status_code=400,
+                detail="Attach at least one camera before starting the bridge — it exits immediately with no mappings.",
+            )
+
+        log_fh = open(_BRIDGE_LOG_PATH, "w")
+        log_fh.write(f"=== bridge started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        log_fh.flush()
         _bridge_proc = _subprocess.Popen(
             ["/usr/bin/python3", str(bridge_script)],
-            stdout=_subprocess.PIPE,
+            stdout=log_fh,
             stderr=_subprocess.STDOUT,
         )
-        logger.info(f"ROS camera bridge started (PID {_bridge_proc.pid})")
-        return {"success": True, "pid": _bridge_proc.pid}
+        log_fh.close()  # the child keeps its own fd; this process no longer needs one
+
+        # Give it long enough to fail on startup (device open, mappings parse).
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            if _bridge_proc.poll() is not None:
+                code = _bridge_proc.returncode
+                _bridge_proc = None
+                tail = _tail_bridge_log()
+                logger.error("Camera bridge exited immediately (rc=%s): %s", code, tail)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Bridge exited immediately (rc={code}): " + " | ".join(tail),
+                )
+            time.sleep(0.15)
+
+        # No write here: io_config.ros_camera was already True (checked above),
+        # so it already reflects what the operator chose on the I/O page.
+        logger.info("ROS camera bridge started (PID %s)", _bridge_proc.pid)
+        return {
+            "success": True,
+            "pid": _bridge_proc.pid,
+            "message": f"Bridge running (PID {_bridge_proc.pid}). Recording will use ROS camera topics.",
+        }
 
 
 @app.post("/ros-camera-bridge/stop")
 def stop_ros_camera_bridge():
-    """Stop the running camera bridge subprocess, including bash-spawned ones."""
+    """Stop the camera bridge — whoever started it — and verify it is gone.
+
+    Escalates TERM -> KILL and confirms with pgrep. The old version fired one
+    pkill and reported success unconditionally, so a process that ignored the
+    signal (or that pkill could not touch) left the UI claiming the bridge was
+    stopped while it still held the cameras, blocking direct capture.
+    """
     global _bridge_proc
+    import time
+
     with _bridge_proc_lock:
-        _subprocess.run(["pkill", "-f", "openarm_camera_bridge_node.py"])
+        if not _camera_bridge_pids():
+            _bridge_proc = None
+            _write_io_config(ros_camera=False)
+            # Acknowledge whatever the log says here, in this response, and
+            # then clear it -- otherwise status would keep reporting
+            # died_unexpectedly for a bridge the operator has now explicitly
+            # dealt with, long after this click.
+            crash_tail = _tail_bridge_log(10)
+            _BRIDGE_LOG_PATH.unlink(missing_ok=True)
+            return {
+                "success": True,
+                "running": False,
+                "message": "Bridge was not running" + (
+                    " (it exited on its own — see log_tail)" if crash_tail else ""
+                ),
+                "log_tail": crash_tail,
+            }
+
+        _subprocess.run(["pkill", "-TERM", "-f", "openarm_camera_bridge_node.py"])
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and _camera_bridge_pids():
+            time.sleep(0.15)
+
+        if _camera_bridge_pids():
+            logger.warning("Camera bridge ignored SIGTERM; escalating to SIGKILL")
+            _subprocess.run(["pkill", "-KILL", "-f", "openarm_camera_bridge_node.py"])
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and _camera_bridge_pids():
+                time.sleep(0.15)
+
+        remaining = _camera_bridge_pids()
         _bridge_proc = None
-        logger.info("ROS camera bridge stopped via pkill")
-        return {"success": True, "message": "Bridge stopped"}
+        if remaining:
+            # Do NOT persist ros_camera=False here: the cameras are still held,
+            # so claiming direct capture is available would be a lie.
+            logger.error("Camera bridge still running after SIGKILL: %s", remaining)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not stop the bridge (PIDs still alive: {remaining}). "
+                       "It may be owned by another user — stop it from the shell that started it.",
+            )
+
+        _write_io_config(ros_camera=False)
+        _BRIDGE_LOG_PATH.unlink(missing_ok=True)  # clean stop, acknowledged -- not a crash to flag later
+        logger.info("ROS camera bridge stopped; direct capture is now available")
+        return {
+            "success": True,
+            "running": False,
+            "message": "Bridge stopped. Recording will read the cameras directly.",
+        }
 
 
 @app.get("/ros-camera-bridge/status")
 def get_ros_camera_bridge_status():
-    """Return running state and PID of the camera bridge, detecting bash-spawned instances."""
-    global _bridge_proc
+    """Return running state and PID of the camera bridge, whoever started it.
+
+    `died_unexpectedly` flags exactly the situation that made a dead bridge
+    look alive in the UI: this endpoint's log file exists (something started
+    it) and pgrep finds nothing (it is not running now), but nobody has called
+    /ros-camera-bridge/stop to acknowledge that -- i.e. it exited on its own
+    mid-session rather than being stopped. `log_tail` is included so the UI can
+    show the crash reason without a second round trip.
+    """
     with _bridge_proc_lock:
-        try:
-            out = _subprocess.check_output(["pgrep", "-f", "openarm_camera_bridge_node.py"]).decode().strip().split("\n")
-            pid = int(out[0]) if out and out[0] else None
-        except (_subprocess.CalledProcessError, ValueError):
-            pid = None
-            
-        if pid is not None:
-            return {"running": True, "pid": pid}
-        return {"running": False, "pid": None}
+        pids = _camera_bridge_pids()
+        running = bool(pids)
+        result = {"running": running, "pid": pids[0] if pids else None}
+        if not running and _BRIDGE_LOG_PATH.is_file():
+            result["died_unexpectedly"] = True
+            result["log_tail"] = _tail_bridge_log(10)
+        return result
 
 
 @app.get("/available-cameras")

@@ -114,12 +114,25 @@ def controller_spawner(context: LaunchContext, robot_controller, arm_prefix):
 
     robot_controller_str = context.perform_substitution(robot_controller)
 
+    # needs_gripper_controller: whether the finger joints still need the separate
+    # GripperActionController.
+    #
+    # The forward position controllers command the finger joints themselves --
+    # they are the 8th entry in their `joints` lists in
+    # openarm_v10_bimanual_controllers.yaml. ros2_control forbids two controllers
+    # claiming the same command interface, so spawning the gripper controllers
+    # alongside them would make the forward position controllers fail to
+    # activate. The joint trajectory controllers cover only the 7 arm joints, so
+    # that path still needs the gripper controllers or the finger joints would
+    # never be commanded at all.
     if robot_controller_str == "forward_position_controller":
         robot_controller_left = "left_forward_position_controller"
         robot_controller_right = "right_forward_position_controller"
+        needs_gripper_controller = False
     elif robot_controller_str == "joint_trajectory_controller":
         robot_controller_left = "left_joint_trajectory_controller"
         robot_controller_right = "right_joint_trajectory_controller"
+        needs_gripper_controller = True
     else:
         raise ValueError(f"Unknown robot_controller: {robot_controller_str}")
 
@@ -131,7 +144,18 @@ def controller_spawner(context: LaunchContext, robot_controller, arm_prefix):
                    robot_controller_right, "-c", controller_manager_ref],
     )
 
-    return [robot_controller_spawner]
+    spawners = [robot_controller_spawner]
+
+    if needs_gripper_controller:
+        spawners.append(Node(
+            package="controller_manager",
+            executable="spawner",
+            namespace=namespace,
+            arguments=["left_gripper_controller",
+                       "right_gripper_controller", "-c", controller_manager_ref],
+        ))
+
+    return spawners
 
 
 def generate_launch_description():
@@ -253,16 +277,12 @@ def generate_launch_description():
         args=[robot_controller, arm_prefix]
     )
 
-    gripper_controller_spawner = OpaqueFunction(
-        function=lambda context: [Node(
-            package="controller_manager",
-            executable="spawner",
-            namespace=namespace_from_context(context, arm_prefix),
-            arguments=["left_gripper_controller",
-                       "right_gripper_controller", "-c",
-                       f"/{namespace_from_context(context, arm_prefix)}/controller_manager" if namespace_from_context(context, arm_prefix) else "/controller_manager"],
-        )]
-    )
+    # The gripper controllers are spawned by controller_spawner() only for the
+    # joint_trajectory_controller path -- see the comment there. Under
+    # forward_position_controller the finger joints are commanded directly as
+    # part of the arm command array, which removed a silent failure mode: when
+    # the GripperCommand action server was not ready, every gripper goal was
+    # dropped with no log while the arm joints kept tracking normally.
 
     # Timing and sequencing
     LAUNCH_DELAY_SECONDS = 1.0
@@ -275,11 +295,6 @@ def generate_launch_description():
         period=LAUNCH_DELAY_SECONDS,
         actions=[controller_spawner_func],
     )
-    delayed_gripper_controller = TimerAction(
-        period=LAUNCH_DELAY_SECONDS,
-        actions=[gripper_controller_spawner],
-    )
-
     return LaunchDescription(
         declared_arguments + [
             robot_nodes_spawner_func,
@@ -288,6 +303,5 @@ def generate_launch_description():
         [
             delayed_joint_state_broadcaster,
             delayed_robot_controller,
-            delayed_gripper_controller,
         ]
     )

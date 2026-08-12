@@ -53,6 +53,63 @@ saved_episodes = 0  # Track how many episodes have been saved
 current_phase = "preparing"  # Track current phase: "preparing", "recording", "saving", "resetting", "completed"
 
 
+def _assert_episode_unlock(events: dict) -> None:
+    """Release the arms this episode is meant to teleoperate.
+
+    Skips any arm the operator has deliberately pinned (``persistent_*_lock``),
+    so re-asserting can never fight a lock the operator asked for.
+    """
+    arm_mode = events.get("_arm_mode", "both")
+    if arm_mode in ("both", "left") and not events.get("persistent_left_lock", False):
+        _send_ui_command({"action": "toggle_left_home", "value": False})
+    if arm_mode in ("both", "right") and not events.get("persistent_right_lock", False):
+        _send_ui_command({"action": "toggle_right_home", "value": False})
+
+
+def _at_home_pose(current_state, target_state, arm_mode: str = "both") -> bool:
+    """Whether the measured state matches the home target within tolerance.
+
+    Shared by the homing confirmation and the re-record path, so "the arm is at
+    home" means exactly one thing in both places.
+
+    The gripper tolerance (5mm, indices 7/15) is kept tight deliberately: its
+    full travel is only ~44mm, so a looser value would let homing "confirm" with
+    the gripper a third of its range open and bake an imprecise home pose into
+    the recording.
+    """
+    if current_state is None or target_state is None:
+        return False
+
+    n_cur = len(current_state)
+    n_tgt = len(target_state)
+
+    # Build arm_mode-aware comparison pairs (current_idx, target_idx)
+    if arm_mode == "right":
+        # Right arm only mode: current_state[0:8] → target_state[8:16]
+        pairs = [(i, 8 + i) for i in range(min(8, n_cur, n_tgt - 8))]
+    elif arm_mode == "left":
+        # Left arm only mode: current_state[0:8] → target_state[0:8]
+        pairs = [(i, i) for i in range(min(8, n_cur, n_tgt))]
+    else:
+        # Both arms mode: check both, including grippers at indices 7 and 15
+        num_per_arm = 8 if n_cur > 14 else 7
+        left_pairs = [(i, i) for i in range(min(num_per_arm, n_cur, n_tgt))]
+        right_start = num_per_arm
+        right_pairs = [
+            (right_start + i, 8 + i)
+            for i in range(min(num_per_arm, n_cur - right_start, n_tgt - 8))
+        ]
+        pairs = left_pairs + [p for p in right_pairs if p[0] < n_cur and p[1] < n_tgt]
+
+    if not pairs:
+        return False
+    for ci, ti in pairs:
+        tol = 0.005 if ci in (7, 15) else 0.15
+        if abs(current_state[ci] - target_state[ti]) > tol:
+            return False
+    return True
+
+
 def _events_state_for_response(events: dict) -> dict:
     """Copy of the events dict safe to log or serialize into an HTTP response.
 
@@ -555,6 +612,31 @@ def _extract_tasks_from_dataset_meta(meta: Any) -> list[str]:
     return tasks
 
 
+def _ros_camera_bridge_enabled() -> bool:
+    """True when the ROS camera bridge process is live.
+
+    The live process is what matters, not the persisted preference: V4L2 devices
+    are exclusive, so whoever holds them decides how frames can be read. A stale
+    `ros_camera: true` in io_config.json with no bridge running must not stop
+    direct capture from opening the cameras.
+    """
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["pgrep", "-f", "openarm_camera_bridge_node.py"],
+            capture_output=True,
+        ).returncode == 0
+    except Exception as e:
+        logger.warning(f"Cannot determine ROS camera bridge state ({e}); assuming direct capture")
+        return False
+
+
+# OpenArm backends: cameras/state are served by the backend itself, not by
+# lerobot camera objects, and both need the same recording-loop treatment.
+_OPENARM_ROBOT_TYPES = ("openarm_ros", "openarm_direct")
+
+
 def create_record_config(request: RecordingRequest) -> RecordConfig:
     """Create a RecordConfig from the recording request"""
     import platform
@@ -608,23 +690,43 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     # Create robot config
     if "openarm_ros" in request.follower_port or "ROS2 (humble)" in request.follower_port:
         from lelab.robots.openarm_ros import OpenArmRosRobotConfig, PassiveROSTeleopConfig
-        # Load ROS camera names from mappings file (ignoring UI camera selection for ROS mode)
-        import json as _json
-        from pathlib import Path as _Path
-        _mappings_path = _Path.home() / ".config" / "lelab" / "ros_camera_mappings.json"
-        _ros_camera_names = []
-        if _mappings_path.is_file():
-            try:
-                _data = _json.loads(_mappings_path.read_text())
-                _ros_camera_names = [m["name"] for m in _data]
-            except Exception as e:
-                logger.error(f"Failed to read ros_camera_mappings: {e}")
-        robot_config = OpenArmRosRobotConfig(
-            cameras={},  # No hardware camera objects for ROS mode
-            arm_mode=request.arm_mode,
-            ros_camera_names=_ros_camera_names,
-            include_ee_pose=request.include_ee_pose,
+        from lelab.robots.openarm_direct import (
+            OpenArmDirectRobotConfig,
+            load_camera_devices,
         )
+
+        # Cameras come from the Camera Setup page's mappings in both modes; only
+        # HOW they are read differs. The ROS camera bridge owns the V4L2 devices
+        # exclusively when it runs, so the two paths are mutually exclusive: if
+        # the bridge is enabled, subscribe to its topics, otherwise open the
+        # devices directly (the same way deploy_act_policy.py does).
+        _ros_bridge = _ros_camera_bridge_enabled()
+        _camera_devices = load_camera_devices(request.arm_mode)
+
+        if _ros_bridge:
+            robot_config = OpenArmRosRobotConfig(
+                cameras={},  # No hardware camera objects for ROS mode
+                arm_mode=request.arm_mode,
+                ros_camera_names=list(_camera_devices.keys()),
+                include_ee_pose=request.include_ee_pose,
+            )
+            logger.info(
+                f"📷 RECORDING via ROS camera bridge: {list(_camera_devices.keys()) or 'no cameras attached'}"
+            )
+        else:
+            robot_config = OpenArmDirectRobotConfig(
+                cameras={},  # devices are opened by CameraReader, not lerobot
+                arm_mode=request.arm_mode,
+                ros_camera_names=[],
+                camera_devices=_camera_devices,
+                # Forced off, not taken from the request: ee_pose is pure FK of
+                # the joint angles this backend already records, and dropping it
+                # keeps observation.state matching action 1:1.
+                include_ee_pose=False,
+            )
+            logger.info(
+                f"📷 RECORDING via direct capture (deploy-identical path): {_camera_devices or 'no cameras attached'}"
+            )
         # We MUST provide a teleop config for lerobot 1.5.0 recording loop
         teleop_config = PassiveROSTeleopConfig()
     else:
@@ -677,7 +779,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     # settings that were disabled to work around the encoder-process-pool
     # freeze bug (multiprocessing forking this process's live ROS sockets and
     # threads is what caused that, not the codec choice).
-    if getattr(robot_config, "type", "") == "openarm_ros":
+    if getattr(robot_config, "type", "") in _OPENARM_ROBOT_TYPES:
         # Video encoding strategy.  With streaming off, LeRobot writes one PNG
         # per frame per camera and re-encodes them at save time.  Measured on
         # this hardware with real 640x480 camera frames: PNG encode is ~20ms
@@ -1095,6 +1197,26 @@ def handle_rerecord_episode() -> dict[str, Any]:
 
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+
+    # Only the recording phase can be re-recorded. Once the request has been
+    # accepted the session moves through discard -> homing -> reset, and a second
+    # press there used to set exit_early again, cutting the reset short and
+    # dropping straight back into recording. Now it is refused: the reset runs to
+    # completion and the operator waits.
+    if (
+        current_phase != "recording"
+        or recording_events.get("rerecord_episode")
+        or recording_events.get("_rerecord_pending")
+    ):
+        logger.info(
+            "Ignoring re-record request: already re-recording (phase=%s)", current_phase
+        )
+        return {
+            "success": False,
+            "message": "Re-record already in progress — resetting, please wait",
+            "current_phase": current_phase,
+        }
+
     recording_events["rerecord_episode"] = True
     recording_events["exit_early"] = True
     logger.info("Re-record episode triggered")
@@ -1570,13 +1692,16 @@ def custom_record_loop(
     # Auto-unlock arms based on arm_mode when each recording episode starts.
     # Uses module-level singleton publisher (_send_ui_command) - instant, no subprocess.
     if dataset is not None:
-        arm_mode = events.get("_arm_mode", "both")
-        unlock_left  = (arm_mode in ("both", "left"))  and not events.get("persistent_left_lock", False)
-        unlock_right = (arm_mode in ("both", "right")) and not events.get("persistent_right_lock", False)
-        if unlock_left:
-            _send_ui_command({"action": "toggle_left_home",  "value": False})
-        if unlock_right:
-            _send_ui_command({"action": "toggle_right_home", "value": False})
+        _assert_episode_unlock(events)
+        # Re-assert for a short window instead of trusting a single message.
+        # The lock side is defended this way already (homing re-sends every ~1s
+        # against ROS drops); the unlock was not, so ONE lost or late-arriving
+        # lock — from a UI click, or the end-of-episode lock the Recording page
+        # fires as the phase changes — left the arm held at home for the whole
+        # episode with nothing to clear it. Re-asserting also covers the bridge's
+        # homing latch, which swallows an unlock that arrives mid-ramp.
+        events["_unlock_reassert_until"] = time.perf_counter() + 2.0
+        events["_unlock_last_sent"] = time.perf_counter()
 
     # Per-stage timing accumulator, so a loop overrun says *which* stage ate the
     # budget instead of just "slower than target FPS". perf_counter() costs ~50ns,
@@ -1612,6 +1737,19 @@ def custom_record_loop(
 
         start_loop_t = time.perf_counter()
 
+        # Keep re-asserting the episode-start unlock for its short window. Bails
+        # out the moment homing starts or the operator pins an arm, so this only
+        # ever defends the beginning of a live episode.
+        _reassert_until = events.get("_unlock_reassert_until", 0.0)
+        if _reassert_until and dataset is not None and not events.get("_is_homing", False):
+            if start_loop_t >= _reassert_until:
+                events["_unlock_reassert_until"] = 0.0
+            elif start_loop_t - events.get("_unlock_last_sent", 0.0) >= 0.5:
+                events["_unlock_last_sent"] = start_loop_t
+                _assert_episode_unlock(events)
+        elif _reassert_until and events.get("_is_homing", False):
+            events["_unlock_reassert_until"] = 0.0
+
         if events.get("exit_early") and events.get("_is_homing", False):
             if events.get("rerecord_episode"):
                 # Re-record means the entire current attempt is invalid,
@@ -1628,13 +1766,56 @@ def custom_record_loop(
             events["exit_early"] = False
             logger.info("Ignoring end-episode request while homing is in progress.")
 
+        # A re-record deferred by the episode minimum below fires as soon as that
+        # minimum elapses. Without this the flag just sat there and the operator
+        # watched the episode they had already cancelled record all the way to
+        # its timeout before being discarded — which looks exactly like the
+        # re-record having restarted the episode.
+        if (
+            events.get("_rerecord_pending")
+            and not events.get("_is_homing", False)
+            and time.perf_counter() - start_episode_t >= MIN_EPISODE_SECONDS
+        ):
+            events["_rerecord_pending"] = False
+            events["exit_early"] = True
+            logger.info("Episode minimum reached; applying the deferred re-record request.")
+
         if events.get("exit_early") and not events.get("_is_homing", False) and dataset is not None:
             # Guard against a command racing with the HTTP handler.  An early
             # command must not enter homing, because those frames would belong
             # to neither a valid episode nor a valid episode ending.
             if time.perf_counter() - start_episode_t < MIN_EPISODE_SECONDS:
-                events["exit_early"] = False
-                logger.info("Ignoring end/stop command before the %.1fs episode minimum.", MIN_EPISODE_SECONDS)
+                # The minimum exists to stop accidental commands from creating
+                # tiny episodes and malformed homing videos. Neither risk exists
+                # when the arm has not left home: there is no motion to truncate
+                # and nothing worth keeping, so a re-record runs immediately
+                # instead of making the operator wait out the countdown.
+                if events.get("rerecord_episode") and _at_home_pose(
+                    events.get("current_robot_state"),
+                    events.get("target_home_state"),
+                    events.get("_arm_mode", "both"),
+                ):
+                    logger.info(
+                        "Re-record %.2fs into the episode with the arm still at home; "
+                        "bypassing the %.1fs minimum.",
+                        time.perf_counter() - start_episode_t,
+                        MIN_EPISODE_SECONDS,
+                    )
+                else:
+                    events["exit_early"] = False
+                    if events.get("rerecord_episode"):
+                        # Hold the request rather than dropping it, and act on it
+                        # the moment the minimum passes (see above).
+                        events["_rerecord_pending"] = True
+                        logger.info(
+                            "Re-record requested before the %.1fs minimum; deferring it.",
+                            MIN_EPISODE_SECONDS,
+                        )
+                    else:
+                        logger.info(
+                            "Ignoring end/stop command before the %.1fs episode minimum.",
+                            MIN_EPISODE_SECONDS,
+                        )
 
         if (events.get("exit_early") or (control_time_s - timestamp <= 0.2)) and not events.get("_is_homing", False):
             if dataset is not None:
@@ -1725,29 +1906,20 @@ def custom_record_loop(
 
             # Re-send home command every ~1s to guard against ROS message drops.
             #
-            # BOUNDED: every re-send carries lock_all=True, so an unbounded loop
-            # keeps re-locking the arm for as long as `is_home` stays false —
-            # which is exactly the "recording started but the arm is still
-            # locked" symptom. After _HOMING_RESEND_LIMIT_S we stop re-asserting
-            # the lock and let the operator take over, rather than pinning the
-            # arm indefinitely because one joint sits a hair outside tolerance.
-            _HOMING_RESEND_LIMIT_S = 10.0
+            # Deliberately UNBOUNDED: this keeps re-locking the arm for as long
+            # as `is_home` stays false. This used to give up and release the
+            # lock back to the exoskeleton after _HOMING_RESEND_LIMIT_S, on the
+            # theory that a stuck lock should hand back to the operator rather
+            # than pin the arm forever over one joint sitting a hair outside
+            # tolerance. In practice that gave-up mid-homing far more often than
+            # it protected against a stuck lock (which the next episode's
+            # _assert_episode_unlock already clears regardless), and looked
+            # exactly like "homing ignored — the arm just kept following the
+            # exoskeleton". Only an explicit operator unlock (the Lock/Unlock
+            # button -> _operator_took_over) should hand control back during
+            # homing now.
             last_home_cmd_time = events.get("_last_home_cmd_time", 0.0)
-            if elapsed_homing > _HOMING_RESEND_LIMIT_S:
-                if not events.get("_homing_resend_gave_up"):
-                    events["_homing_resend_gave_up"] = True
-                    logger.warning(
-                        "Homing did not confirm within %.0fs; stopping the lock_all re-send so "
-                        "the arm is not held locked. Releasing arms for teleoperation.",
-                        _HOMING_RESEND_LIMIT_S,
-                    )
-                    # Actively release, otherwise the last lock_all we sent stands.
-                    arm_mode_r = events.get("_arm_mode", "both")
-                    if arm_mode_r in ("both", "left") and not events.get("persistent_left_lock", False):
-                        _send_ui_command({"action": "toggle_left_home", "value": False})
-                    if arm_mode_r in ("both", "right") and not events.get("persistent_right_lock", False):
-                        _send_ui_command({"action": "toggle_right_home", "value": False})
-            elif time.perf_counter() - last_home_cmd_time > 1.0:
+            if time.perf_counter() - last_home_cmd_time > 1.0:
                 try:
                     if target_state is not None:
                         if len(target_state) == 16:
@@ -1769,39 +1941,9 @@ def custom_record_loop(
                 logger.warning("Homing is still in progress after %.1fs; waiting for home target.", elapsed_homing)
 
             if current_state is not None and target_state is not None:
-                # Build arm_mode-aware comparison pairs (current_idx, target_idx)
-                arm_mode = events.get("_arm_mode", "both")
-                n_cur = len(current_state)
-                n_tgt = len(target_state)
-
-                if arm_mode == "right":
-                    # Right arm only mode: current_state[0:8] → target_state[8:16]
-                    pairs = [(i, 8 + i) for i in range(min(8, n_cur, n_tgt - 8))]
-                elif arm_mode == "left":
-                    # Left arm only mode: current_state[0:8] → target_state[0:8]
-                    pairs = [(i, i) for i in range(min(8, n_cur, n_tgt))]
-                else:
-                    # Both arms mode: check both, including grippers at indices 7 and 15
-                    num_per_arm = 8 if n_cur > 14 else 7
-                    left_pairs = [(i, i) for i in range(min(num_per_arm, n_cur, n_tgt))]
-                    right_start = num_per_arm
-                    right_pairs = [(right_start + i, 8 + i) for i in range(min(num_per_arm, n_cur - right_start, n_tgt - 8))]
-                    pairs = left_pairs + [p for p in right_pairs if p[0] < n_cur and p[1] < n_tgt]
-
-                is_home = bool(pairs)
-                if is_home:
-                    for ci, ti in pairs:
-                        # 5mm on the gripper. Kept tight deliberately: the gripper's
-                        # full travel is only ~44mm, so a looser tolerance would let
-                        # homing "confirm" with the gripper a third of its range open
-                        # and bake an imprecise home pose into the recording. The
-                        # stuck-lock failure was never this check — it was the
-                        # unbounded lock_all re-send (bounded below) and the homing
-                        # latch in the bridge, both fixed at source.
-                        tol = 0.005 if ci in (7, 15) else 0.15
-                        if abs(current_state[ci] - target_state[ti]) > tol:
-                            is_home = False
-                            break
+                is_home = _at_home_pose(
+                    current_state, target_state, events.get("_arm_mode", "both")
+                )
 
                 if is_home:
                     # Require the target to be observed for a short interval
@@ -2059,7 +2201,10 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
     web_events.setdefault("_sync_pending_rows", [])
 
-    if getattr(cfg.robot, "type", "") == "openarm_ros":
+    if getattr(cfg.robot, "type", "") == "openarm_direct":
+        from lelab.robots.openarm_direct import OpenArmDirectRobot
+        robot = OpenArmDirectRobot(cfg.robot)
+    elif getattr(cfg.robot, "type", "") == "openarm_ros":
         from lelab.robots.openarm_ros import OpenArmRosRobot
         robot = OpenArmRosRobot(cfg.robot)
     else:
@@ -2424,6 +2569,10 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     )
                     web_events["rerecord_episode"] = False
                     web_events["exit_early"] = False
+                    # Clear any deferred request too, so a press that arrived
+                    # inside the episode minimum cannot fire again after this
+                    # attempt has already been discarded.
+                    web_events["_rerecord_pending"] = False
                     _discard_episode_attempt(dataset)
 
                     # Go through reset phase before re-recording (don't increment episode counters)

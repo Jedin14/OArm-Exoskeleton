@@ -12,8 +12,6 @@
 import numpy as np
 import rclpy
 import yaml
-from control_msgs.action import GripperCommand
-from rclpy.action import ActionClient
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
@@ -43,7 +41,6 @@ class ExoskeletonBridgeNode(Node):
         super().__init__('exoskeleton_bridge_node')
 
         # Existing parameters
-        self.declare_parameter('gripper_threshold', 0.005)
         self.declare_parameter('gripper_scaling_factor', 0.02)
         self.declare_parameter('left_joint_multipliers', [1.0] * 7)
         self.declare_parameter('right_joint_multipliers', [1.0] * 7)
@@ -56,9 +53,12 @@ class ExoskeletonBridgeNode(Node):
         self.declare_parameter('joint_max_delta_per_sec', 1.8)
         self.declare_parameter('gripper_smoothing_alpha', 0.75)
         self.declare_parameter('gripper_max_delta_per_sec', 0.180)
-        self.declare_parameter('gripper_action_min_period_sec', 0.01)
-        # Goal effort. The controllers allow 50.0; see _send_gripper_action.
-        self.declare_parameter('gripper_max_effort', 10.0)
+        # gripper_threshold / gripper_action_min_period_sec / gripper_max_effort
+        # are gone: they only ever throttled and bounded GripperCommand action
+        # GOALS. The gripper is now a position command in the same message as
+        # the arm joints, so there is no goal to rate-limit, and closing force is
+        # set by GRIPPER_DEFAULT_KP/KD in v10_simple_hardware.hpp (20.0 / 2.5)
+        # rather than by a per-goal max_effort.
         self.declare_parameter('gripper_min_position_m', 0.0)
         self.declare_parameter('gripper_max_position_m', 0.050)
         self.declare_parameter('gripper_close_extra_m', 0.0)
@@ -82,7 +82,6 @@ class ExoskeletonBridgeNode(Node):
         self.declare_parameter('boot_homing_arm_target', [0.0] * 7)
         self.declare_parameter('boot_homing_gripper_target', 0.044)
 
-        self.gripper_threshold = float(self.get_parameter('gripper_threshold').value)
         self.gripper_scale = float(self.get_parameter('gripper_scaling_factor').value)
         self.left_joint_multipliers = self._parse_joint_multipliers(
             self.get_parameter('left_joint_multipliers').value, 'left'
@@ -98,10 +97,6 @@ class ExoskeletonBridgeNode(Node):
         self.joint_max_delta_per_sec = max(0.05, float(self.get_parameter('joint_max_delta_per_sec').value))
         self.gripper_smoothing_alpha = float(np.clip(self.get_parameter('gripper_smoothing_alpha').value, 0.01, 1.0))
         self.gripper_max_delta_per_sec = max(0.002, float(self.get_parameter('gripper_max_delta_per_sec').value))
-        self.gripper_action_min_period_sec = max(
-            0.01, float(self.get_parameter('gripper_action_min_period_sec').value)
-        )
-        self.gripper_max_effort = float(self.get_parameter('gripper_max_effort').value)
         self.gripper_min_position_m = float(self.get_parameter('gripper_min_position_m').value)
         self.gripper_max_position_m = float(self.get_parameter('gripper_max_position_m').value)
         if self.gripper_max_position_m <= self.gripper_min_position_m:
@@ -134,8 +129,19 @@ class ExoskeletonBridgeNode(Node):
         self.left_arm_pub = self.create_publisher(Float64MultiArray, '/left_forward_position_controller/commands', 10)
         self.right_arm_pub = self.create_publisher(Float64MultiArray, '/right_forward_position_controller/commands', 10)
 
-        self.left_gripper_client = ActionClient(self, GripperCommand, '/left_gripper_controller/gripper_cmd')
-        self.right_gripper_client = ActionClient(self, GripperCommand, '/right_gripper_controller/gripper_cmd')
+        # Commanded gripper aperture in METRES, [left, right].
+        #
+        # This node is the only one that knows gripper_scaling_factor and the
+        # min/max clamp, so it is the only one that can say what aperture was
+        # actually commanded. Recording used to take the gripper straight off
+        # /{side}_arm/joint_command, which carries the exoskeleton's normalised
+        # 0..1 trigger — so datasets held action in 0..1 and observation.state in
+        # metres for the same channel. Publishing the metres here lets the
+        # recorder use one unit without duplicating this scale factor.
+        self.gripper_cmd_m_pub = self.create_publisher(Float64MultiArray, '/exo/gripper_command_m', 10)
+
+        # No gripper ActionClient: the finger joint is published as the 8th
+        # entry of the forward position controller command (see _publish_arm).
 
         # Desired inputs from retargeting
         self.input_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
@@ -192,8 +198,6 @@ class ExoskeletonBridgeNode(Node):
         self.ui_command_sub = self.create_subscription(String, '/exo/ui_command', self.ui_command_callback, _ui_cmd_qos)
 
         self.last_control_time = None
-        self.last_gripper_sent = {'left': 0.0, 'right': 0.0}
-        self.last_gripper_sent_time = {'left': 0.0, 'right': 0.0}
 
         self.control_timer = self.create_timer(1.0 / self.control_rate_hz, self.control_loop)
 
@@ -202,7 +206,6 @@ class ExoskeletonBridgeNode(Node):
             f'  control_rate_hz: {self.control_rate_hz}\n'
             f'  joint_smoothing_alpha: {self.joint_smoothing_alpha}, joint_max_delta_per_sec: {self.joint_max_delta_per_sec}\n'
             f'  gripper_smoothing_alpha: {self.gripper_smoothing_alpha}, gripper_max_delta_per_sec: {self.gripper_max_delta_per_sec}\n'
-            f'  gripper_threshold: {self.gripper_threshold}, gripper_action_min_period_sec: {self.gripper_action_min_period_sec}\n'
             f'  gripper_range_m: [{self.gripper_min_position_m}, {self.gripper_max_position_m}], gripper_close_extra_m: {self.gripper_close_extra_m}\n'
             f'  homing_gripper_duration_sec: {self.homing_gripper_duration_sec}\n'
             f'  enable_boot_homing: {self.enable_boot_homing}, boot_homing_duration_sec: {self.boot_homing_duration_sec}\n'
@@ -321,6 +324,16 @@ class ExoskeletonBridgeNode(Node):
                     self.gripper_max_position_m
                 )
             )
+            # Mirror it in metres for the recorder (see gripper_cmd_m_pub).
+            # Published from here, not the control loop, so it is emitted at the
+            # trigger's own rate and carries the pre-smoothing target — the same
+            # quantity the arm joints' action channel carries.
+            msg_out = Float64MultiArray()
+            msg_out.data = [
+                float(self.input_gripper['left']),
+                float(self.input_gripper['right']),
+            ]
+            self.gripper_cmd_m_pub.publish(msg_out)
 
     def joint_states_callback(self, msg: JointState):
         index_by_name = {name: idx for idx, name in enumerate(msg.name)}
@@ -345,40 +358,25 @@ class ExoskeletonBridgeNode(Node):
         delta = float(np.clip(blended - current, -max_delta, max_delta))
         return current + delta
 
-    def _publish_arm(self, side, arm_values):
+    def _publish_arm(self, side, arm_values, gripper_value):
+        """Publish the 7 arm joints AND the finger joint as one command array.
+
+        The forward position controller owns the finger joint now (it is the 8th
+        entry in its `joints` list), so the gripper is just another position
+        command. This replaced a GripperCommand ActionClient, which added an
+        action server that could silently be unavailable -- dropping every
+        gripper command while the arm joints kept tracking normally.
+
+        Sending both in one message also means the gripper can no longer lag the
+        arm: they are commanded from the same tick at the same 100 Hz, with no
+        goal-rate throttling or change threshold in between.
+        """
         msg = Float64MultiArray()
-        msg.data = [float(x) for x in arm_values]
+        msg.data = [float(x) for x in arm_values] + [float(gripper_value)]
         if side == 'left':
             self.left_arm_pub.publish(msg)
         else:
             self.right_arm_pub.publish(msg)
-
-    def _send_gripper_action(self, side, position, now_sec):
-        client = self.left_gripper_client if side == 'left' else self.right_gripper_client
-        if not client.server_is_ready():
-            return
-
-        if now_sec - self.last_gripper_sent_time[side] < self.gripper_action_min_period_sec:
-            return
-
-        if abs(position - self.last_gripper_sent[side]) < self.gripper_threshold:
-            return
-
-        goal_msg = GripperCommand.Goal()
-        goal_msg.command.position = float(position)
-        # Was hardcoded to 10.0 while the controllers permit 50.0
-        # (openarm_v10_bimanual_controllers.yaml), i.e. 20% of the available
-        # force. Under load — closing on an object, or overcoming the
-        # gripper's own mechanical resistance — effort is what bounds closing
-        # SPEED, so the timing parameters alone cannot fix a sluggish close.
-        # Left at 10.0 by default because raising it increases crush force on
-        # whatever is being grasped; raise deliberately with
-        #   ros2 launch ... gripper_max_effort:=25.0
-        goal_msg.command.max_effort = self.gripper_max_effort
-        client.send_goal_async(goal_msg)
-
-        self.last_gripper_sent[side] = float(position)
-        self.last_gripper_sent_time[side] = now_sec
 
     def _initialize_from_current_state(self, now_sec):
         for side in ('left', 'right'):
@@ -391,8 +389,6 @@ class ExoskeletonBridgeNode(Node):
                 np.clip(self.current_gripper[side], self.gripper_min_position_m, self.gripper_max_position_m)
             )
             self.cmd_gripper[side] = current_gripper
-            self.last_gripper_sent[side] = current_gripper
-            self.last_gripper_sent_time[side] = now_sec
             self.boot_start_arm[side] = self.current_arm[side].copy()
             self.boot_start_gripper[side] = current_gripper
 
@@ -443,8 +439,7 @@ class ExoskeletonBridgeNode(Node):
                     self.cmd_gripper[side], desired_gripper, self.gripper_smoothing_alpha, gripper_max_delta
                 )
 
-                self._publish_arm(side, self.cmd_arm[side])
-                self._send_gripper_action(side, self.cmd_gripper[side], now_sec)
+                self._publish_arm(side, self.cmd_arm[side], self.cmd_gripper[side])
 
             if progress >= 1.0:
                 self.boot_phase = 'follow'
@@ -525,6 +520,25 @@ class ExoskeletonBridgeNode(Node):
             # the latch.
             if self.homing_active[side] and now_sec >= self.homing_until[side]:
                 self.homing_active[side] = False
+                # An unlock that arrived DURING the ramp was computed against the
+                # latched home target, so its transition covered ~zero distance
+                # and lock_state already flipped to False -- meaning no further
+                # state change would ever fire the real unlock. The arm then
+                # crawled out of home on the rate-limited fallback path instead
+                # of the eased unlock ramp, which reads as "the arm is stuck at
+                # the start of the episode". Fire the transition now that the
+                # exoskeleton pose is usable as a target.
+                # Deliberately only a flag: the transition block above has already
+                # run this tick, so the ramp starts on the NEXT one, from the
+                # current pose to the live exoskeleton target. Rewriting the
+                # target here instead would step straight to the operator's pose
+                # on this tick with no easing.
+                if not is_locked:
+                    self.force_transition[side] = True
+                    self.get_logger().info(
+                        f"{side.capitalize()} arm: homing ramp finished while unlocked; "
+                        "starting the deferred unlock transition."
+                    )
 
             time_since_transition = now_sec - self.transition_start_time[side]
             if time_since_transition < self.transition_duration[side]:
@@ -575,17 +589,17 @@ class ExoskeletonBridgeNode(Node):
                 effective_alpha = 1.0             # Bypass exponential lag
             elif is_locked:
                 # Locked and transition complete: snap to exact target.
-                # Only re-send periodically (keep-alive) to avoid flooding
-                # the gripper controller while the arm holds a fixed position.
+                #
+                # The gripper is now part of the same position command as the
+                # arm, so it is held at its exact target every tick just like
+                # the arm joints. This used to re-send the gripper goal only
+                # every 2 s (a keep-alive, to avoid flooding the action server
+                # with goals) while the arm was commanded continuously -- so
+                # while parked at home the gripper was only being told its
+                # target once every 2 seconds.
                 self.cmd_arm[side] = desired_arm.copy() if hasattr(desired_arm, 'copy') else np.array(desired_arm, dtype=float)
                 self.cmd_gripper[side] = desired_gripper
-                self._publish_arm(side, self.cmd_arm[side])
-                locked_resend_period = 2.0  # re-send gripper goal at most every 2 s when locked
-                if now_sec - self.last_gripper_sent_time[side] >= locked_resend_period:
-                    # Temporarily mark position as stale so the threshold check
-                    # inside _send_gripper_action doesn't suppress the keep-alive.
-                    self.last_gripper_sent[side] = -1.0
-                    self._send_gripper_action(side, self.cmd_gripper[side], now_sec)
+                self._publish_arm(side, self.cmd_arm[side], self.cmd_gripper[side])
                 continue
             else:
                 effective_joint_max_delta = joint_max_delta
@@ -598,8 +612,7 @@ class ExoskeletonBridgeNode(Node):
                 self.cmd_gripper[side], desired_gripper, self.gripper_smoothing_alpha, gripper_max_delta
             )
 
-            self._publish_arm(side, self.cmd_arm[side])
-            self._send_gripper_action(side, self.cmd_gripper[side], now_sec)
+            self._publish_arm(side, self.cmd_arm[side], self.cmd_gripper[side])
 
 
 def main(args=None):

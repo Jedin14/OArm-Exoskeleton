@@ -26,6 +26,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import JointState, Joy, CompressedImage
+from std_msgs.msg import Float64MultiArray
 
 import tf2_ros
 from tf2_ros import TransformListener, Buffer
@@ -75,6 +76,11 @@ class LeLabBridgeNode(Node):
         self._pos: dict[str, float] = {j: 0.0 for j in ALL_JOINTS}
         self._vel: dict[str, float] = {j: 0.0 for j in ALL_JOINTS}
 
+        # Commanded gripper aperture in metres per side, from
+        # /exo/gripper_command_m. None until the first message arrives.
+        self.gripper_cmd_m: dict[str, float | None] = {'left': None, 'right': None}
+        self._warned_gripper_units = False
+
         self.latest_action   = {}
         self.action_timestamps: dict[str, float] = {}
         self.action_ros_timestamps: dict[str, float] = {}
@@ -111,6 +117,13 @@ class LeLabBridgeNode(Node):
                                  self.right_action_callback, 10)
         self.create_subscription(Joy, '/exo/gamepad_keys',
                                  self.joy_callback, 10)
+        # Commanded gripper aperture in metres, published by
+        # exoskeleton_bridge_node. /{side}_arm/joint_command carries the
+        # exoskeleton's normalised 0..1 trigger in slot 7, which is a different
+        # unit from observation.state's metres; recording both in metres keeps
+        # one encoding per channel.
+        self.create_subscription(Float64MultiArray, '/exo/gripper_command_m',
+                                 self.gripper_cmd_m_callback, 10)
 
         # Broadcast timer @ 100 Hz
         self.create_timer(0.01, self.broadcast_loop)
@@ -175,26 +188,52 @@ class LeLabBridgeNode(Node):
                 self.action_timestamps[name] = received_at
                 self.action_ros_timestamps[name] = ros_timestamp
 
+            raw_gripper = None
             if len(msg.position) >= 8:
-                name = f"openarm_{side}_finger_joint1"
-                self.latest_action[name] = float(msg.position[7])
-                self.action_timestamps[name] = received_at
-                self.action_ros_timestamps[name] = ros_timestamp
+                raw_gripper = float(msg.position[7])
             elif f'{side}_gripper_joint' in msg.name:
                 try:
                     idx = msg.name.index(f'{side}_gripper_joint')
-                    name = f"openarm_{side}_finger_joint1"
-                    self.latest_action[name] = float(msg.position[idx])
-                    self.action_timestamps[name] = received_at
-                    self.action_ros_timestamps[name] = ros_timestamp
+                    raw_gripper = float(msg.position[idx])
                 except ValueError:
-                    pass
+                    raw_gripper = None
+
+            if raw_gripper is not None:
+                name = f"openarm_{side}_finger_joint1"
+                # Prefer the aperture in metres that exoskeleton_bridge_node
+                # actually commanded. raw_gripper is the normalised 0..1 trigger,
+                # and recording that alongside a metres observation.state gave the
+                # same channel two encodings. The raw value is only a fallback for
+                # when that topic is absent (bridge not running / older build),
+                # and it is warned about once so a unit-mixed dataset cannot be
+                # produced silently.
+                gripper_m = self.gripper_cmd_m.get(side)
+                if gripper_m is not None:
+                    self.latest_action[name] = gripper_m
+                else:
+                    if not self._warned_gripper_units:
+                        self._warned_gripper_units = True
+                        self.get_logger().warn(
+                            "/exo/gripper_command_m not seen; recording the gripper ACTION as the "
+                            "normalised 0..1 trigger while observation.state stays in metres. "
+                            "Start exoskeleton_bridge_node to record both in metres."
+                        )
+                    self.latest_action[name] = raw_gripper
+                self.action_timestamps[name] = received_at
+                self.action_ros_timestamps[name] = ros_timestamp
 
     def left_action_callback(self, msg: JointState):
         self._extract_action('left', msg)
 
     def right_action_callback(self, msg: JointState):
         self._extract_action('right', msg)
+
+    def gripper_cmd_m_callback(self, msg: Float64MultiArray):
+        if len(msg.data) < 2:
+            return
+        with self.lock:
+            self.gripper_cmd_m['left'] = float(msg.data[0])
+            self.gripper_cmd_m['right'] = float(msg.data[1])
 
     def joy_callback(self, msg: Joy):
         with self.lock:

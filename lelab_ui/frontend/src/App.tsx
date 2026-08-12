@@ -9,6 +9,7 @@ import Teleoperation from "@/pages/Teleoperation";
 import Calibration from "@/pages/Calibration";
 import Recording from "@/pages/Recording";
 import CameraSetup from "@/pages/CameraSetup";
+import IOConfigPage from "@/pages/IOConfig";
 import Inference from "@/pages/Inference";
 import EditDataset from "@/pages/EditDataset";
 import Upload from "@/pages/Upload";
@@ -48,6 +49,7 @@ function App() {
                             <Route path="/upload" element={<Upload />} />
                             <Route path="/dataset-preview" element={<DatasetPreview />} />
                             <Route path="/camera-setup" element={<CameraSetup />} />
+                            <Route path="/io-config" element={<IOConfigPage />} />
                             <Route path="/inference" element={<Inference />} />
                             <Route path="/calibration" element={<Calibration />} />
                             <Route path="/edit-dataset" element={<EditDataset />} />

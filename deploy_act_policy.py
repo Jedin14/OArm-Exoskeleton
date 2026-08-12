@@ -31,10 +31,18 @@ CONTROL_HZ   = 100   # High-frequency motor control loop for smooth interpolatio
 GRIPPER_HOME_PATH = Path(__file__).with_name("gripper_home.yaml")
 
 # Match the ROS 2 OpenArm hardware mapping used during exoskeleton training.
-# Actions record gripper as normalized opening: 0.0=closed, 1.0=open.
-# Observations record finger_joint1 in meters: 0.0=closed, 0.044=open.
+# BOTH action and observation record the gripper as finger_joint1 aperture in
+# METRES (0.0=closed, 0.044=open). Datasets recorded before /exo/gripper_command_m
+# existed hold the ACTION as a normalised 0..1 trigger instead — check
+# meta/info.json's action stats: a max of ~1.0 means normalised, ~0.044 means
+# metres. Set GRIPPER_ACTION_IN_METRES=False to deploy one of those older ones.
 GRIPPER_OPEN_JOINT_M = 0.044
 GRIPPER_OPEN_MOTOR_DELTA_RAD = -1.0472
+GRIPPER_ACTION_IN_METRES = True
+# Upper bound for the gripper action channel, in whatever unit it carries. The
+# clips below used a hardcoded 1.0, which is a no-op against a metres action
+# (0..0.044) and would let a bad inference command a metre of aperture.
+GRIPPER_ACTION_MAX = GRIPPER_OPEN_JOINT_M if GRIPPER_ACTION_IN_METRES else 1.0
 
 # Motor types per arm (J1-J7)
 MOTOR_TYPES = [
@@ -111,14 +119,29 @@ def gripper_motor_to_joint_m(motor_pos, closed_motor_pos):
     return float(np.clip(open_fraction, 0.0, 1.0) * GRIPPER_OPEN_JOINT_M)
 
 def gripper_action_to_motor(action_value, closed_motor_pos):
-    """Convert model gripper action 0..1 opening fraction to absolute motor radians."""
-    open_fraction = float(np.clip(action_value, 0.0, 1.0))
+    """Convert the model's gripper action to absolute motor radians.
+
+    The action is an aperture in metres (GRIPPER_ACTION_IN_METRES), matching
+    observation.state, so it is divided by the open aperture to recover the
+    opening fraction the motor mapping needs. Older datasets emit the fraction
+    directly; the flag switches back for those.
+    """
+    if GRIPPER_ACTION_IN_METRES:
+        open_fraction = float(np.clip(action_value, 0.0, GRIPPER_OPEN_JOINT_M)) / GRIPPER_OPEN_JOINT_M
+    else:
+        open_fraction = float(np.clip(action_value, 0.0, 1.0))
     return closed_motor_pos + open_fraction * GRIPPER_OPEN_MOTOR_DELTA_RAD
 
 def observation_to_action_seed(state8):
-    """Use current observed aperture as the initial 0..1 gripper action for smoothing."""
+    """Seed the action smoother from the currently observed aperture.
+
+    With the action in metres this is already the right unit — state[7] IS an
+    aperture — so no rescale is needed. Rescaling here while the action is metres
+    would seed the smoother ~23x too small and snap the gripper shut on startup.
+    """
     seed = np.array(state8, dtype=np.float32)
-    seed[7] = float(np.clip(seed[7] / GRIPPER_OPEN_JOINT_M, 0.0, 1.0))
+    if not GRIPPER_ACTION_IN_METRES:
+        seed[7] = float(np.clip(seed[7] / GRIPPER_OPEN_JOINT_M, 0.0, 1.0))
     return seed
 
 def read_arm_state(arm, gripper_closed_motor_pos):
@@ -361,8 +384,8 @@ def main():
             if target_act is not None:
                 right_target = target_act[8:16].copy()
                 left_target = target_act[0:8].copy()
-                right_target[7] = float(np.clip(right_target[7], 0.0, 1.0))
-                left_target[7] = float(np.clip(left_target[7], 0.0, 1.0))
+                right_target[7] = float(np.clip(right_target[7], 0.0, GRIPPER_ACTION_MAX))
+                left_target[7] = float(np.clip(left_target[7], 0.0, GRIPPER_ACTION_MAX))
                 
                 # Initialize smoothing from current position to avoid initial jump
                 if current_action_right is None:
@@ -372,12 +395,12 @@ def main():
                     
                 # Smooth pursuit
                 current_action_right += alpha * (right_target - current_action_right)
-                current_action_right[7] = float(np.clip(current_action_right[7], 0.0, 1.0))
+                current_action_right[7] = float(np.clip(current_action_right[7], 0.0, GRIPPER_ACTION_MAX))
                 send_arm_action(right_arm, current_action_right, gripper_homes["right"])
                 
                 if is_bimanual:
                     current_action_left += alpha * (left_target - current_action_left)
-                    current_action_left[7] = float(np.clip(current_action_left[7], 0.0, 1.0))
+                    current_action_left[7] = float(np.clip(current_action_left[7], 0.0, GRIPPER_ACTION_MAX))
                     send_arm_action(left_arm, current_action_left, gripper_homes["left"])
                     
             # Debug print

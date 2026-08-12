@@ -49,6 +49,22 @@ PIDS=()
 LOG_DIR=""
 SKIP_WEBSOCKET_STEP="false"
 LAUNCH_LELAB="false"
+# ROS camera bridge: off by default (see the launch block below for why).
+# A persisted UI toggle in ~/.config/lelab/io_config.json wins over this
+# default; an explicit --ros-camera/--no-ros-camera on the command line wins
+# over both.
+USE_ROS_CAMERA="false"
+IO_CONFIG="${HOME}/.config/lelab/io_config.json"
+if [[ -f "$IO_CONFIG" ]]; then
+    _persisted="$(python3 -c "
+import json,sys
+try:
+    print(str(json.load(open('$IO_CONFIG')).get('ros_camera', False)).lower())
+except Exception:
+    print('false')
+" 2>/dev/null)"
+    [[ "$_persisted" == "true" ]] && USE_ROS_CAMERA="true"
+fi
 LELAB_PORT="8000"
 
 usage() {
@@ -76,6 +92,9 @@ Options:
   --clean-start         Kill previous teleop/ROS/RViz processes before launch (default)
   --no-clean-start      Do not kill previous processes before launch
   --lelab               Also launch leLab web UI (training/dataset viewer)
+  --ros-camera          Publish cameras as ROS topics (adds a JPEG round trip;
+                        off by default, and blocks direct OpenCV capture)
+  --no-ros-camera       Force the ROS camera bridge off, overriding the UI setting
   --lelab-port PORT     leLab web UI port (default: 8000)
   -h, --help            Show this help
 
@@ -339,6 +358,8 @@ while [[ $# -gt 0 ]]; do
         --clean-start) CLEAN_START="true" ;;
         --no-clean-start) CLEAN_START="false" ;;
         --lelab) LAUNCH_LELAB="true" ;;
+        --ros-camera) USE_ROS_CAMERA="true" ;;
+        --no-ros-camera) USE_ROS_CAMERA="false" ;;
         --lelab-port) LELAB_PORT="${2:?--lelab-port requires an argument}"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) err "Unknown option: $1"; usage >&2; exit 1 ;;
@@ -556,9 +577,28 @@ if [[ "$LAUNCH_LELAB" == "true" ]]; then
     launch_step ros2_lelab_bridge \
         /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/ros2_lelab_bridge.py"
         
-    log "Starting ROS 2 Camera Bridge ..."
-    launch_step ros2_camera_bridge \
-        /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/openarm_camera_bridge_node.py"
+    # ROS camera bridge is OFF by default.
+    #
+    # It captures V4L2 -> JPEG-encodes -> republishes as CompressedImage, and
+    # leLab then JPEG-decodes. Deployment (deploy_act_policy.py:59) reads the
+    # cameras directly with cv2.VideoCapture and never does that round trip, so
+    # training through the bridge bakes compression artifacts and extra latency
+    # into the data that the policy never sees at run time.
+    #
+    # V4L2 devices are also exclusive: while the bridge holds a camera, the
+    # direct reader cannot open it. The two paths cannot both run.
+    #
+    # Enable only when you deliberately want the ROS topics (e.g. RViz):
+    #   ./openarm_teleop.sh --ros-camera
+    # or persist it from the leLab config page, which writes ros_camera into
+    # ~/.config/lelab/io_config.json (read above).
+    if [[ "$USE_ROS_CAMERA" == "true" ]]; then
+        log "Starting ROS 2 Camera Bridge (--ros-camera) ..."
+        launch_step ros2_camera_bridge \
+            /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/openarm_camera_bridge_node.py"
+    else
+        log "ROS camera bridge DISABLED (direct OpenCV capture). Enable with --ros-camera."
+    fi
 
     log "Starting leLab web UI on port $LELAB_PORT ..."
     PORT="$LELAB_PORT" launch_step lelab "$LELAB_VENV"

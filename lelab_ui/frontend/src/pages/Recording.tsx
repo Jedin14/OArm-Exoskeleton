@@ -349,11 +349,16 @@ const Recording = () => {
             // Note: Auto-unlock is now handled synchronously in the backend
             // to completely eliminate polling delay when recording starts.
           } else if (prev === "recording" && real !== "recording") {
-            // Lock arms to home when recording phase ends
+            // Reflect the lock the BACKEND performs, without sending our own.
+            //
+            // This used to POST toggle_*_home:true here. That command is
+            // redundant — the recorder already sends set_home_target with
+            // lock_all when it enters homing, and again at reset — and it was
+            // racy: fired from a ~1s status poll, it could arrive after the next
+            // episode's unlock and leave the arm pinned at home for that whole
+            // episode. Lock/unlock during a session now has exactly one owner.
             setLeftArmFixed(true);
             setRightArmFixed(true);
-            fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
-            fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
             if (real === "resetting") playResetStartCue();
           } else if (real === "resetting") {
             playResetStartCue();
@@ -577,7 +582,11 @@ const Recording = () => {
       );
       const data = await response.json();
 
-      if (response.ok) {
+      // The endpoint answers 200 even when it refuses the request (e.g. a
+      // re-record is already in progress), so response.ok alone would show a
+      // success toast for a press that did nothing — which is what made a
+      // second press look necessary.
+      if (response.ok && data.success !== false) {
         setRerecordTick((t) => t + 1);
         toast({
           title: "Re-recording Episode",

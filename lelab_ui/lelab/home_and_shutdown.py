@@ -16,7 +16,25 @@ class HomingNode(Node):
         self.current_left = [0.0] * 7
         self.current_right = [0.0] * 7
         self.got_state = False
-        
+
+        # The forward position controllers now command the finger joint as an
+        # 8th joint (see openarm_v10_bimanual_controllers.yaml), so every command
+        # must carry 8 values. ForwardCommandController REJECTS a command whose
+        # size does not match its joint count, so publishing the old 7-element
+        # array here would silently stop homing the arms altogether.
+        #
+        # The gripper is held at its CURRENT measured aperture rather than driven
+        # to either end: this runs on shutdown, and an arm that may be holding
+        # something should neither crush it (commanding 0 applies full closing
+        # force through GRIPPER_DEFAULT_KP) nor drop it.
+        #
+        # GRIPPER_UNKNOWN_M is only reached if /joint_states never arrives within
+        # the 2 s window below. Open is the safe guess there: it cannot generate
+        # crush force against an unknown obstruction.
+        self.GRIPPER_UNKNOWN_M = 0.044
+        self.current_left_grip = self.GRIPPER_UNKNOWN_M
+        self.current_right_grip = self.GRIPPER_UNKNOWN_M
+
         # Left joint names in order expected by controller
         self.left_names = [
             'openarm_left_joint1', 'openarm_left_joint2', 'openarm_left_joint3', 'openarm_left_joint4',
@@ -26,6 +44,8 @@ class HomingNode(Node):
             'openarm_right_joint1', 'openarm_right_joint2', 'openarm_right_joint3', 'openarm_right_joint4',
             'openarm_right_joint5', 'openarm_right_joint6', 'openarm_right_joint7'
         ]
+        self.left_grip_name = 'openarm_left_finger_joint1'
+        self.right_grip_name = 'openarm_right_finger_joint1'
 
     def joint_callback(self, msg: JointState):
         if not self.got_state:
@@ -38,6 +58,10 @@ class HomingNode(Node):
                     if name in msg.name:
                         idx = msg.name.index(name)
                         self.current_right[i] = msg.position[idx]
+                if self.left_grip_name in msg.name:
+                    self.current_left_grip = msg.position[msg.name.index(self.left_grip_name)]
+                if self.right_grip_name in msg.name:
+                    self.current_right_grip = msg.position[msg.name.index(self.right_grip_name)]
                 self.got_state = True
             except Exception as e:
                 self.get_logger().error(f"Error parsing joints: {e}")
@@ -63,9 +87,9 @@ class HomingNode(Node):
             left_msg = Float64MultiArray()
             right_msg = Float64MultiArray()
             
-            # Interpolate towards 0
-            left_msg.data = [pos * (1.0 - fraction) for pos in self.current_left]
-            right_msg.data = [pos * (1.0 - fraction) for pos in self.current_right]
+            # Interpolate the arm joints towards 0; hold the gripper where it is.
+            left_msg.data = [pos * (1.0 - fraction) for pos in self.current_left] + [float(self.current_left_grip)]
+            right_msg.data = [pos * (1.0 - fraction) for pos in self.current_right] + [float(self.current_right_grip)]
             
             self.left_pub.publish(left_msg)
             self.right_pub.publish(right_msg)

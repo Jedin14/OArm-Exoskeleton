@@ -47,6 +47,19 @@ controller_manager:
 
 left_forward_position_controller:
   ros__parameters:
+    # The finger joint is commanded here alongside the arm joints, NOT through
+    # left_gripper_controller (position_controllers/GripperActionController).
+    # The hardware exports a plain `position` command interface for the finger
+    # joint exactly like the arm joints (v10_simple_hardware.cpp
+    # export_command_interfaces) and write() converts it with
+    # joint_to_motor_radians, so the action layer added nothing but a failure
+    # mode: an action server that was not ready silently dropped every gripper
+    # goal while the arm joints kept tracking, which looked like "the arm homed
+    # but the gripper ignored its target".
+    #
+    # ros2_control forbids two controllers claiming one command interface, so
+    # left_gripper_controller must NOT be spawned while this list includes the
+    # finger joint (see openarm.bimanual.launch.py).
     joints:
       - openarm_left_joint1
       - openarm_left_joint2
@@ -55,6 +68,7 @@ left_forward_position_controller:
       - openarm_left_joint5
       - openarm_left_joint6
       - openarm_left_joint7
+      - openarm_left_finger_joint1
     interface_name: position
     command_interfaces:
       - position
@@ -113,6 +127,8 @@ left_gripper_controller:
 
 right_forward_position_controller:
   ros__parameters:
+    # Finger joint commanded here, not via right_gripper_controller -- see the
+    # left_forward_position_controller comment above.
     joints:
       - openarm_right_joint1
       - openarm_right_joint2
@@ -121,6 +137,7 @@ right_forward_position_controller:
       - openarm_right_joint5
       - openarm_right_joint6
       - openarm_right_joint7
+      - openarm_right_finger_joint1
     interface_name: position
     command_interfaces:
       - position
