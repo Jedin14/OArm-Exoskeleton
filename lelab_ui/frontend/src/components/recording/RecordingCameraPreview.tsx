@@ -3,6 +3,7 @@ import { Camera, Eye, Maximize2, Minimize2, X } from 'lucide-react';
 import { useApi } from '@/contexts/ApiContext';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import CameraSetup from '@/pages/CameraSetup';
+import MotorForces from '@/pages/MotorForces';
 
 interface RecordingCameraPreviewProps {
   cameras: string[];
@@ -12,6 +13,7 @@ export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ 
   const { baseUrl, fetchWithHeaders } = useApi();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showSetupModal, setShowSetupModal] = useState(false);
+  const [showForcesModal, setShowForcesModal] = useState(false);
   const [showCameraViewer, setShowCameraViewer] = useState(false);
   // Name of the camera currently enlarged inline, or null for the normal grid.
   const [expandedCam, setExpandedCam] = useState<string | null>(null);
@@ -78,6 +80,15 @@ export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ 
           >
             Manage Cameras
           </button>
+          {/* Reachable mid-episode, same as Manage Cameras: the gripper force
+              limit is something you latch while actually squeezing an object. */}
+          <button
+            type="button"
+            onClick={() => setShowForcesModal(true)}
+            className="bg-violet-600 hover:bg-violet-500 text-white text-xs px-3 py-1 rounded transition-colors"
+          >
+            Motor Forces
+          </button>
         </div>
       </div>
 
@@ -122,6 +133,16 @@ export const RecordingCameraPreview: React.FC<RecordingCameraPreviewProps> = ({ 
             <DialogDescription>Attach and detach cameras</DialogDescription>
           </DialogHeader>
           <CameraSetup isModal onClose={() => setShowSetupModal(false)} />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showForcesModal} onOpenChange={setShowForcesModal}>
+        <DialogContent className="max-w-7xl w-[90vw] max-h-[90vh] bg-black border-gray-800 p-0 overflow-y-auto">
+          <DialogHeader className="sr-only">
+            <DialogTitle>Motor Forces</DialogTitle>
+            <DialogDescription>Live motor torque and gripper force limit</DialogDescription>
+          </DialogHeader>
+          <MotorForces isModal onClose={() => setShowForcesModal(false)} />
         </DialogContent>
       </Dialog>
     </div>

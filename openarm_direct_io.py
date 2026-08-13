@@ -65,7 +65,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -100,6 +100,19 @@ class MotorLimits:
 DM4310 = MotorLimits(12.5, 30.0, 10.0)
 DM4340 = MotorLimits(12.5, 8.0, 28.0)
 DM8009 = MotorLimits(12.5, 45.0, 54.0)
+
+# One OpenArm: 7 joints + gripper, feedback (master) ids 0x11..0x18.
+# Types mirror deploy_act_policy.py's MOTOR_TYPES + init_gripper_motor(DM4310),
+# which is the authority for what is physically on the bus. Defined here so the
+# recorder and any torque readout decode with the SAME scaling instead of each
+# picking a default.
+OPENARM_RECV_IDS = (0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18)
+OPENARM_MOTOR_LIMITS = {
+    0x11: DM8009, 0x12: DM8009,          # J1, J2
+    0x13: DM4340, 0x14: DM4340,          # J3, J4
+    0x15: DM4310, 0x16: DM4310, 0x17: DM4310,   # J5, J6, J7
+    0x18: DM4310,                        # gripper
+}
 
 
 def _uint_to_double(x: int, lo: float, hi: float, bits: int) -> float:
@@ -152,12 +165,33 @@ class StateReader:
     """
 
     def __init__(self, channel: str, recv_ids: Iterable[int],
-                 limits: MotorLimits = DM4310, fd: bool = True,
-                 history: int = 512):
+                 limits: "MotorLimits | Mapping[int, MotorLimits]" = DM4310,
+                 fd: bool = True, history: int = 512):
+        """
+        `limits` may be a single MotorLimits (all motors identical) or a mapping
+        of can_id -> MotorLimits.
+
+        PER-MOTOR limits matter for torque and velocity. This arm mixes three
+        types (DM8009 / DM4340 / DM4310) whose t_max are 54 / 28 / 10 Nm and
+        v_max 45 / 8 / 30 rad/s, so decoding every motor with one profile
+        misreports both -- e.g. a DM8009 joint read as a DM4310 reports 10/54 of
+        its real torque. POSITION is immune, because all three share p_max=12.5,
+        which is why a position-only validation cannot catch this.
+        """
         self.channel = channel
         self.recv_ids = list(recv_ids)
         self._index = {cid: i for i, cid in enumerate(self.recv_ids)}
-        self.limits = limits
+        if isinstance(limits, MotorLimits):
+            self._limits_by_id = {cid: limits for cid in self.recv_ids}
+        else:
+            missing = [cid for cid in self.recv_ids if cid not in limits]
+            if missing:
+                raise ValueError(
+                    f"no MotorLimits given for can id(s) {[hex(c) for c in missing]}"
+                )
+            self._limits_by_id = dict(limits)
+        # Kept for backwards compatibility with callers that read `.limits`.
+        self.limits = limits if isinstance(limits, MotorLimits) else None
         self.fd = fd
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
@@ -230,7 +264,7 @@ class StateReader:
             can_id &= CAN_SFF_MASK if not (can_id & CAN_EFF_FLAG) else 0x1FFFFFFF
             if can_id not in self._index:
                 continue
-            fb = decode_feedback(can_id, payload[:max(8, length)], self.limits, ts)
+            fb = decode_feedback(can_id, payload[:max(8, length)], self._limits_by_id[can_id], ts)
             if fb is None:
                 continue
             self.frames_decoded += 1
@@ -270,6 +304,20 @@ class StateReader:
                 return None, 0.0
             best = min(self._history, key=lambda kv: abs(kv[0] - t))
             return best[1].copy(), best[0]
+
+    def latest_feedback(self) -> Dict[int, MotorFeedback]:
+        """Newest decoded frame per can id, including torque.
+
+        The position history deliberately carries positions only (it exists for
+        timestamp-nearest state pairing during recording). Torque is read from
+        here instead, so adding a force readout costs nothing on the record path.
+        """
+        with self._lock:
+            return dict(self._latest)
+
+    def torque_limits(self) -> Dict[int, float]:
+        """Per-motor |torque| full scale (Nm), for rendering a bar or % of max."""
+        return {cid: lim.t_max for cid, lim in self._limits_by_id.items()}
 
     def stop(self) -> None:
         self._stop.set()

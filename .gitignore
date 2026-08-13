@@ -22,3 +22,6 @@ __pycache__/
 # Core dumps
 core
 visualize_episodes/
+
+# graphify code-graph tool output (regenerable cache, ~200 files)
+graphify-out/

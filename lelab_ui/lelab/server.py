@@ -815,6 +815,12 @@ def _operator_took_over(arm: str) -> None:
 # ---------------------------------------------------------------------------
 
 IO_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "lelab", "io_config.json")
+# Serializes the read-modify-write in _write_io_config. The os.replace is atomic
+# per-write, but two concurrent requests (an /io-config POST and a bridge
+# start/stop, which are independent HTTP handlers) could both read the same
+# state, then both write, and the later replace would silently discard the other
+# one's change.
+_io_config_lock = threading.Lock()
 IO_CONFIG_DEFAULTS = {"ros_camera": False}
 
 
@@ -836,34 +842,374 @@ def _write_io_config(**changes) -> dict:
     Shared by the I/O page and the Camera Setup bridge buttons so those two can
     never disagree about whether the ROS camera bridge is wanted.
     """
-    os.makedirs(os.path.dirname(IO_CONFIG_PATH), exist_ok=True)
-    cfg = _read_io_config()
-    for key, value in changes.items():
-        if key in IO_CONFIG_DEFAULTS:
-            cfg[key] = value
-    tmp = IO_CONFIG_PATH + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(cfg, fh, indent=1)
-    os.replace(tmp, IO_CONFIG_PATH)   # atomic: never leave a half-written config
-    logger.info("io_config updated: %s", cfg)
-    return cfg
+    with _io_config_lock:
+        os.makedirs(os.path.dirname(IO_CONFIG_PATH), exist_ok=True)
+        cfg = _read_io_config()
+        for key, value in changes.items():
+            if key in IO_CONFIG_DEFAULTS:
+                cfg[key] = value
+        # Unique temp name per writer: a shared ".tmp" path means two concurrent
+        # writers can have the same file open and one's os.replace can publish
+        # the other's partial content.
+        tmp = f"{IO_CONFIG_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(cfg, fh, indent=1)
+            os.replace(tmp, IO_CONFIG_PATH)   # atomic: never leave a half-written config
+        except Exception:
+            # Do not leave the scratch file behind on a failed write.
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+        logger.info("io_config updated: %s", cfg)
+        return cfg
 
 
 def _camera_bridge_pids() -> list[int]:
-    import subprocess as _sp
-    try:
-        out = _sp.run(
-            ["pgrep", "-f", "openarm_camera_bridge_node.py"],
-            capture_output=True, text=True,
-        ).stdout
-    except Exception as e:
-        logger.warning("pgrep for camera bridge failed: %s", e)
-        return []
-    return [int(p) for p in out.split() if p.isdigit()]
+    """Real camera-bridge PIDs, via /proc rather than `pgrep -f`.
+
+    See lelab.utils.procs for why: concurrent pgrep calls matched each other's
+    command line and reported a bridge that was not running, which is what made
+    this page flip between its ROS and direct layouts.
+    """
+    from lelab.utils.procs import camera_bridge_pids
+    return camera_bridge_pids()
 
 
 class IOConfigRequest(BaseModel):
     ros_camera: bool
+
+
+class GripperLimitRequest(BaseModel):
+    side: str                        # "left" | "right"
+    torque_nm: float | None = None   # cap closing torque (the normal case)
+    aperture_m: float | None = None  # or pin the aperture directly; None+None latches
+                                     # at the currently measured aperture
+
+
+_force_page_restore: dict[str, list[float]] = {}
+_force_page_lock = threading.Lock()
+_caps_last_pushed = 0.0
+_CAPS_REPUSH_PERIOD_S = 5.0
+
+
+def _ensure_persisted_caps_applied() -> None:
+    """Re-assert the saved torque caps to the bridge, periodically.
+
+    Deliberately NOT once-per-run. It was, and that was a bug: openarm_teleop.sh
+    starts lelab BEFORE the bridge, and /exo/ui_command is VOLATILE, so a single
+    push made before the bridge existed reached no subscriber and was never
+    retried -- leaving the bridge with no cap while the UI happily showed one.
+
+    Re-sending every few seconds is idempotent (setting the same cap twice does
+    nothing) and self-heals a bridge restarted underneath a running lelab. The
+    bridge also loads the same file at startup, so this is now belt-and-braces
+    rather than the only path.
+    """
+    global _caps_last_pushed
+    now = time.monotonic()
+    if now - _caps_last_pushed < _CAPS_REPUSH_PERIOD_S:
+        return
+    _caps_last_pushed = now
+
+    from lelab import motors
+
+    caps = motors.load_gripper_torque_caps()
+    for side, cap in caps.items():
+        motors.set_gripper_torque_limit(side, cap, enforce_locally=False)
+        _send_ui_command_safe(
+            {"action": "set_gripper_torque_cap", "side": side, "torque_nm": float(cap)}
+        )
+
+
+@app.post("/arms/lock-here")
+def arms_lock_here():
+    """Stop following the exoskeleton, holding the arms exactly where they are.
+
+    The home page calls this so the arms are never live just because a browser is
+    open. Holds the CURRENT pose rather than homing: locking should not itself
+    command a motion the operator did not ask for.
+    """
+    from lelab.record import recording_active
+
+    if recording_active:
+        return {"success": True, "applied": False, "message": "Recording in progress — left alone."}
+
+    pose = _capture_pose_16()
+    if pose is None:
+        # No feedback to build a hold pose from; fall back to locking at the
+        # existing home target rather than leaving the arms following.
+        _send_ui_command_safe({"action": "home_all"})
+        return {"success": True, "applied": True, "held_current_pose": False}
+
+    _send_ui_command_safe({
+        "action": "set_home_target",
+        "left_arm": pose[0:7],
+        "left_gripper": pose[7],
+        "right_arm": pose[8:15],
+        "right_gripper": pose[15],
+        "lock_all": True,
+    })
+    return {"success": True, "applied": True, "held_current_pose": True}
+
+
+@app.post("/force-page/enter")
+def force_page_enter():
+    """Let the exoskeleton drive the arms while the Motor Forces page is open.
+
+    Captures the pose first so /force-page/exit can put the arms back exactly
+    where they were, then releases them so the operator can actually squeeze
+    something and watch the torque.
+
+    Does NOTHING while a recording is active: the recorder owns lock state during
+    a session (it unlocks per episode and homes between them), and a second owner
+    fighting it is how an arm ends up pinned mid-episode.
+    """
+    from lelab.record import recording_active
+
+    if recording_active:
+        return {
+            "success": True,
+            "applied": False,
+            "message": "Recording in progress — the recorder already controls the arms.",
+        }
+
+    pose = _capture_pose_16()
+    if pose is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No live motor feedback, so the current pose cannot be captured "
+                   "to return to. Check the CAN link.",
+        )
+    with _force_page_lock:
+        _force_page_restore["pose"] = pose
+
+    _send_ui_command_safe({"action": "toggle_left_home", "value": False})
+    _send_ui_command_safe({"action": "toggle_right_home", "value": False})
+    logger.info("force page: arms released to the exoskeleton; pose captured for restore")
+    return {"success": True, "applied": True, "captured_pose": pose}
+
+
+@app.post("/force-page/exit")
+def force_page_exit():
+    """Return the arms to the pose captured on entry and hold them there."""
+    from lelab.record import recording_active
+
+    if recording_active:
+        return {"success": True, "applied": False, "message": "Recording in progress — left alone."}
+
+    with _force_page_lock:
+        pose = _force_page_restore.pop("pose", None)
+
+    if pose is None:
+        # Nothing captured (entry never ran, or already restored). Still lock, so
+        # leaving the page never leaves the arms following the operator.
+        _send_ui_command_safe({"action": "home_all"})
+        return {"success": True, "applied": True, "restored": False}
+
+    _send_ui_command_safe({
+        "action": "set_home_target",
+        "left_arm": pose[0:7],
+        "left_gripper": pose[7],
+        "right_arm": pose[8:15],
+        "right_gripper": pose[15],
+        "lock_all": True,
+    })
+    logger.info("force page: arms returning to the captured pose and locking")
+    return {"success": True, "applied": True, "restored": True, "pose": pose}
+
+
+def _capture_pose_16() -> list[float] | None:
+    """Current pose as the 16-value layout the bridge's set_home_target expects:
+    left joints 1-7, left gripper (m), right joints 1-7, right gripper (m)."""
+    from lelab import motors
+
+    data = motors.get_monitor().read()
+    pose: list[float] = []
+    for side in ("left", "right"):
+        arm = data.get("arms", {}).get(side) or {}
+        by_joint = {m.get("joint"): m for m in arm.get("motors", [])}
+        for index in range(1, 8):
+            motor = by_joint.get(f"joint{index}")
+            if not motor or motor.get("stale") or motor.get("position_rad") is None:
+                return None
+            pose.append(float(motor["position_rad"]))
+        finger = by_joint.get("finger")
+        if not finger or finger.get("stale") or finger.get("position_rad") is None:
+            return None
+        pose.append(motors.aperture_m_from_motor(side, finger["position_rad"]))
+    return pose
+
+
+@app.get("/motor-torques")
+def get_motor_torques():
+    """Live torque (Nm) for every motor on both arms, plus any active gripper limit.
+
+    Works with or without a recording in progress: it owns a passive, read-only
+    CAN listener rather than reaching into the recording backend, so the landing
+    page and the in-recording panel read from the same source.
+    """
+    from lelab import motors
+
+    _ensure_persisted_caps_applied()
+    data = motors.get_monitor().read()
+    data["gripper_limits_m"] = motors.get_gripper_limits()
+    data["gripper_torque_limits_nm"] = motors.get_gripper_torque_limits()
+    data["cap_enforcement"] = motors.cap_enforcement_report()
+    data["default_gripper_torque_cap_nm"] = motors.DEFAULT_GRIPPER_TORQUE_CAP_NM
+    # The bridge's own report, so the UI can distinguish "no cap armed in the
+    # bridge" from "cap armed but being outrun" — different problems.
+    data["bridge_cap_state"] = motors.bridge_cap_state()
+    return data
+
+
+@app.post("/gripper-limit")
+def set_gripper_limit(req: GripperLimitRequest):
+    """Cap one gripper's closing force.
+
+    Normal use is `torque_nm`: the value you read off the force page. Since the
+    gripper is position-commanded and its force comes from a hardware-compiled
+    gain, there is no effort register to lower -- so a watchdog closes the loop
+    instead, holding the aperture as soon as measured torque reaches the cap and
+    letting it close again when the torque falls away. The clamped aperture is
+    what gets commanded, so the recorded `action` matches the hardware.
+
+    `aperture_m` pins the aperture directly, and passing neither latches at the
+    aperture the gripper is holding right now.
+    """
+    from lelab import motors
+
+    side = req.side.lower()
+    if side not in ("left", "right"):
+        raise HTTPException(status_code=400, detail="side must be 'left' or 'right'")
+
+    if req.torque_nm is not None:
+        if req.torque_nm <= 0:
+            raise HTTPException(status_code=400, detail="torque_nm must be greater than 0")
+        t_max = _gripper_rated_torque_nm(side)
+        if t_max and req.torque_nm > t_max:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{req.torque_nm} Nm exceeds the gripper motor's rated {t_max} Nm",
+            )
+        # The BRIDGE enforces this, not lelab. It reads the gripper's torque off
+        # CAN itself and clamps inside its 100 Hz control loop, so the cap acts on
+        # the same tick the force is measured. lelab previously watched torque and
+        # published an aperture floor over ROS; that round trip is 20-40ms, and
+        # the gripper had already reached 6.84 Nm against a 4.49 Nm cap before the
+        # floor landed. lelab now only records the setpoint for display.
+        motors.set_gripper_torque_limit(side, req.torque_nm, enforce_locally=False)
+        motors.save_gripper_torque_cap(side, req.torque_nm)   # survives a restart
+        motors.reset_torque_peak(side)   # so "is it enforced?" judges the NEW cap
+        _send_ui_command_safe(
+            {"action": "set_gripper_torque_cap", "side": side, "torque_nm": float(req.torque_nm)}
+        )
+        logger.info("gripper torque limit set: %s arm capped at %.2f Nm", side, req.torque_nm)
+        return {
+            "success": True,
+            "mode": "torque",
+            "torque_nm": req.torque_nm,
+            "gripper_torque_limits_nm": motors.get_gripper_torque_limits(),
+            "gripper_limits_m": motors.get_gripper_limits(),
+        }
+
+    aperture = req.aperture_m
+    if aperture is None:
+        # No torque cap and no aperture: refuse rather than guess. Latching at
+        # "wherever the gripper happens to be" is how a limit ended up pinned at
+        # 37.7mm of a 44mm range -- a floor that near fully-open stops the
+        # gripper closing at all, which looks like a broken gripper rather than a
+        # force limit. A cap in Nm is what this endpoint is for.
+        raise HTTPException(
+            status_code=400,
+            detail="Specify torque_nm (the maximum closing torque). Pass aperture_m "
+                   "only to pin a specific opening on purpose.",
+        )
+
+    limits = motors.set_gripper_limit(side, aperture)
+    # Tell the bridge, which is what actually enforces it on the command path.
+    _push_gripper_floor(side, aperture)
+    logger.info("gripper limit set: %s arm floored at %.4f m", side, aperture)
+    return {"success": True, "mode": "aperture", "gripper_limits_m": limits, "aperture_m": aperture}
+
+
+def _push_gripper_floor(side: str, aperture_m: float | None) -> None:
+    """Send an aperture floor to the bridge, which enforces it on the command path."""
+    if aperture_m is None:
+        _send_ui_command_safe({"action": "clear_gripper_limit", "side": side})
+    else:
+        _send_ui_command_safe(
+            {"action": "set_gripper_limit", "side": side, "aperture_m": float(aperture_m)}
+        )
+
+
+def _gripper_rated_torque_nm(side: str) -> float | None:
+    from lelab import motors
+
+    arm = motors.get_monitor().read().get("arms", {}).get(side) or {}
+    for motor in arm.get("motors", []):
+        if motor.get("joint") == "finger":
+            return motor.get("t_max_nm")
+    return None
+
+
+@app.delete("/gripper-limit/{side}")
+def clear_gripper_limit(side: str):
+    """Release the limit so the gripper can close fully again."""
+    from lelab import motors
+
+    side = side.lower()
+    if side not in ("left", "right"):
+        raise HTTPException(status_code=400, detail="side must be 'left' or 'right'")
+    limits = motors.clear_gripper_limit(side)
+    # Clear BOTH mechanisms: the torque cap the bridge enforces, and any aperture
+    # hold left over from it (or from an explicit aperture pin). Sending only one
+    # is how a stale hold survives a "release" and the gripper stays pinned.
+    _send_ui_command_safe({"action": "clear_gripper_torque_cap", "side": side})
+    _send_ui_command_safe({"action": "clear_gripper_limit", "side": side})
+    logger.info("gripper limit released: %s arm", side)
+    return {"success": True, "gripper_limits_m": limits}
+
+
+def _measured_gripper_aperture_m(side: str) -> float | None:
+    """Current gripper aperture in metres, from the same conversion the recorder uses.
+
+    Reads the gripper motor's angle off the passive CAN listener and applies the
+    motor-radians -> metres mapping. Falls back to the live recording robot's
+    observation when one is running, since that value is already converted.
+    """
+    from lelab import motors
+    from lelab.record import active_robot
+
+    if active_robot is not None and hasattr(active_robot, "get_joint_positions"):
+        try:
+            for name, value in active_robot.get_joint_positions().items():
+                if "finger" in name and f"_{side}_" in name:
+                    return float(value)
+        except Exception as e:
+            logger.debug("could not read gripper aperture from the recorder: %s", e)
+
+    data = motors.get_monitor().read()
+    arm = data.get("arms", {}).get(side, {})
+    for motor in arm.get("motors", []):
+        if motor.get("joint") == "finger" and not motor.get("stale") and motor.get("position_rad") is not None:
+            # motors.aperture_m_from_motor, not a local formula: this previously
+            # divided by a positive span while the motor goes NEGATIVE when
+            # opening, so every reading clamped to 0 and the limit latched at
+            # "0.0 mm". It also ignored the per-arm closed offset in
+            # gripper_home.yaml (0.0967 / 0.2157 rad, not 0).
+            return motors.aperture_m_from_motor(side, motor["position_rad"])
+    return None
+
+
+def _send_ui_command_safe(cmd: dict) -> None:
+    try:
+        from lelab.record import _send_ui_command
+        _send_ui_command(cmd)
+    except Exception as e:
+        logger.error("could not publish %s: %s", cmd.get("action"), e)
 
 
 @app.get("/io-config")
@@ -2081,8 +2427,11 @@ def start_ros_camera_bridge():
                        "is already active.",
             )
 
-        # Kill any existing bridge processes to avoid camera locks and JSON conflicts
-        _subprocess.run(["pkill", "-f", "openarm_camera_bridge_node.py"])
+        # Kill any existing bridge processes to avoid camera locks and JSON
+        # conflicts. Targeted signals, not `pkill -f` — that pattern also matches
+        # unrelated processes that merely mention the script name.
+        from lelab.utils.procs import stop_camera_bridge
+        stop_camera_bridge()
         time.sleep(0.2)
 
         bridge_script = Path(__file__).parent.parent.parent / "src" / "qnbot_teleoperator" / "scripts" / "openarm_camera_bridge_node.py"
@@ -2133,13 +2482,13 @@ def start_ros_camera_bridge():
 def stop_ros_camera_bridge():
     """Stop the camera bridge — whoever started it — and verify it is gone.
 
-    Escalates TERM -> KILL and confirms with pgrep. The old version fired one
-    pkill and reported success unconditionally, so a process that ignored the
-    signal (or that pkill could not touch) left the UI claiming the bridge was
-    stopped while it still held the cameras, blocking direct capture.
+    Escalates TERM -> KILL against the exact PIDs found in /proc and confirms
+    they are gone. The old version fired one `pkill -f` and reported success
+    unconditionally, so a process that ignored the signal left the UI claiming
+    the bridge was stopped while it still held the cameras, blocking direct
+    capture.
     """
     global _bridge_proc
-    import time
 
     with _bridge_proc_lock:
         if not _camera_bridge_pids():
@@ -2160,19 +2509,9 @@ def stop_ros_camera_bridge():
                 "log_tail": crash_tail,
             }
 
-        _subprocess.run(["pkill", "-TERM", "-f", "openarm_camera_bridge_node.py"])
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and _camera_bridge_pids():
-            time.sleep(0.15)
-
-        if _camera_bridge_pids():
-            logger.warning("Camera bridge ignored SIGTERM; escalating to SIGKILL")
-            _subprocess.run(["pkill", "-KILL", "-f", "openarm_camera_bridge_node.py"])
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and _camera_bridge_pids():
-                time.sleep(0.15)
-
-        remaining = _camera_bridge_pids()
+        # TERM -> wait -> KILL -> wait, against the PIDs themselves.
+        from lelab.utils.procs import stop_camera_bridge
+        remaining = stop_camera_bridge()
         _bridge_proc = None
         if remaining:
             # Do NOT persist ros_camera=False here: the cameras are still held,

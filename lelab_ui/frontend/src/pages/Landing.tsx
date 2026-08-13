@@ -127,6 +127,15 @@ const Landing = () => {
     }
   }, [location.state, auth, navigate, baseUrl, fetchWithHeaders]);
 
+  // The home page never leaves the arms following the exoskeleton. Whatever the
+  // last screen did — the force page releasing them, a session that ended
+  // unlocked — landing here holds them where they are. Locking at the CURRENT
+  // pose rather than homing, so arriving on this page never commands a motion
+  // nobody asked for. No-op during a recording: the recorder owns lock state.
+  useEffect(() => {
+    fetchWithHeaders(`${baseUrl}/arms/lock-here`, { method: "POST" }).catch(() => undefined);
+  }, [baseUrl, fetchWithHeaders]);
+
   // Clear camera state and release streams when returning to landing page
   useEffect(() => {
     if (cameras.length > 0) {
@@ -416,6 +425,13 @@ const Landing = () => {
                 className="w-full bg-gray-700 hover:bg-gray-600 text-gray-200"
               >
                 I/O Configuration
+              </Button>
+              <Button
+                onClick={() => navigate("/motor-forces")}
+                variant="secondary"
+                className="w-full bg-gray-700 hover:bg-gray-600 text-gray-200"
+              >
+                Motor Forces
               </Button>
             </div>
           </div>

@@ -232,8 +232,14 @@ class LeLabBridgeNode(Node):
         if len(msg.data) < 2:
             return
         with self.lock:
-            self.gripper_cmd_m['left'] = float(msg.data[0])
-            self.gripper_cmd_m['right'] = float(msg.data[1])
+            for idx, side in enumerate(('left', 'right')):
+                value = float(msg.data[idx])
+                # NaN means that side has never reported a real trigger value
+                # (see exoskeleton_bridge_node). Leave it as None so the action
+                # falls back rather than recording an invented aperture.
+                if value != value:  # NaN
+                    continue
+                self.gripper_cmd_m[side] = value
 
     def joy_callback(self, msg: Joy):
         with self.lock:

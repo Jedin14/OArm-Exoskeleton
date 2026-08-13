@@ -564,14 +564,33 @@ const Recording = () => {
     setShowRerecordPrompt(true);
   }, [backendStatus, baseUrl, fetchWithHeaders]);
 
-  const confirmRerecordEpisode = useCallback(async () => {
-    setShowRerecordPrompt(false);
-
-    // Lock arms back to exact zero before triggering backend re-record
+  // Re-lock both arms. Shared by confirm and cancel: requestRerecordEpisode
+  // unlocks the arms BEFORE the operator has decided anything, so every way out
+  // of that dialog has to put them back. Abandoning the dialog used to leave a
+  // live exoskeleton unlocked with the UI still showing it as locked.
+  const relockArms = useCallback(() => {
     setLeftArmFixed(true);
     setRightArmFixed(true);
     fetchWithHeaders(`${baseUrl}/toggle-left-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
     fetchWithHeaders(`${baseUrl}/toggle-right-arm-home`, { method: "POST", body: JSON.stringify({ fixed: true }) }).catch(console.error);
+  }, [baseUrl, fetchWithHeaders]);
+
+  // Any dismissal that is not an explicit confirm: Cancel, Escape, overlay
+  // click. Radix routes all of them through onOpenChange(false).
+  const cancelRerecordPrompt = useCallback(() => {
+    setShowRerecordPrompt(false);
+    relockArms();
+    toast({
+      title: "Re-record cancelled",
+      description: "Arms re-locked to home. The episode is still recording.",
+    });
+  }, [relockArms, toast]);
+
+  const confirmRerecordEpisode = useCallback(async () => {
+    setShowRerecordPrompt(false);
+
+    // Lock arms back to exact zero before triggering backend re-record
+    relockArms();
 
     try {
       const response = await fetchWithHeaders(
@@ -606,7 +625,7 @@ const Recording = () => {
         variant: "destructive",
       });
     }
-  }, [backendStatus, baseUrl, fetchWithHeaders, toast]);
+  }, [backendStatus, baseUrl, fetchWithHeaders, toast, relockArms]);
 
   const handleStopRecording = useCallback(async () => {
     if (!backendStatus?.available_controls.stop_recording) return;
@@ -789,7 +808,12 @@ const Recording = () => {
   const phaseColor =
     currentPhase === "recording"
       ? { dot: "bg-red-500", pill: "bg-red-500/15 text-red-300", timer: "text-green-400", bar: "bg-green-500", button: "bg-green-500 hover:bg-green-600" }
-      : currentPhase === "homing" || currentPhase === "saving"
+      : currentPhase === "saving"
+      // Blue, distinct from the orange "act now" phases (homing/resetting):
+      // saving is the one phase where the operator has nothing to do and must
+      // not touch the arms, so it should not look like the others.
+      ? { dot: "bg-blue-500", pill: "bg-blue-500/15 text-blue-300", timer: "text-blue-400", bar: "bg-blue-500", button: "bg-blue-500 hover:bg-blue-600" }
+      : currentPhase === "homing"
       ? { dot: "bg-orange-500", pill: "bg-orange-500/15 text-orange-300", timer: "text-orange-400", bar: "bg-orange-500", button: "bg-orange-500 hover:bg-orange-600" }
       : currentPhase === "resetting"
       ? { dot: "bg-orange-500", pill: "bg-orange-500/15 text-orange-300", timer: "text-orange-400", bar: "bg-orange-500", button: "bg-orange-500 hover:bg-orange-600" }
@@ -1183,7 +1207,15 @@ const Recording = () => {
         </div>
       </div>
 
-      <AlertDialog open={showRerecordPrompt} onOpenChange={setShowRerecordPrompt}>
+      {/* onOpenChange catches Cancel, Escape and overlay clicks alike — all of
+          them must re-lock, because opening this dialog already unlocked the
+          arms. */}
+      <AlertDialog
+        open={showRerecordPrompt}
+        onOpenChange={(open) => {
+          if (!open) cancelRerecordPrompt();
+        }}
+      >
         <AlertDialogContent className="bg-gray-900 border-gray-700 text-white">
           <AlertDialogHeader>
             <AlertDialogTitle>Re-record Episode</AlertDialogTitle>
@@ -1192,6 +1224,8 @@ const Recording = () => {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
+            {/* No onClick: closing routes through onOpenChange above, so adding
+                one here would re-lock and toast twice. */}
             <AlertDialogCancel className="bg-gray-800 border-gray-700 text-white hover:bg-gray-700">
               Cancel
             </AlertDialogCancel>

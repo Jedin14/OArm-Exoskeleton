@@ -22,6 +22,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   VideoOff,
+  Plug,
 } from "lucide-react";
 
 const CAMERA_SLOT_NAMES = ["main_camera", "right_camera", "left_camera"] as const;
@@ -59,16 +60,22 @@ const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ is
   const [bridgeRunning, setBridgeRunning] = useState(false);
   const [bridgePid, setBridgePid] = useState<number | null>(null);
   const [bridgeCrash, setBridgeCrash] = useState<string[] | null>(null);
+  // Which refresh() sources failed on the last poll, so the page can say it is
+  // showing stale data instead of quietly presenting it as current.
+  const [staleSources, setStaleSources] = useState<string[]>([]);
   const [bridgeLoading, setBridgeLoading] = useState(false);
-  // Capture mode. The ROS bridge is off by default, in which case recording
-  // opens these devices directly (the same path deployment uses) and there is
-  // no bridge to start — so the bridge controls stay hidden.
-  const [rosCameraMode, setRosCameraMode] = useState(false);
-  // The raw I/O Configuration preference, distinct from rosCameraMode: that one
-  // also factors in whether the bridge happens to already be running, so it
-  // can't be used to gate "Start Bridge" -- it would let the button light up
-  // the moment it succeeds even though the preference was never opted into.
+  const [reconnecting, setReconnecting] = useState(false);
+  // The persisted I/O Configuration preference. This ALONE decides how the page
+  // presents itself, so the wording and controls stay put regardless of whether
+  // a bridge process happens to be alive at this instant.
   const [ioRosCameraEnabled, setIoRosCameraEnabled] = useState(false);
+
+  // Which capture path this page is describing.
+  const rosCameraMode = ioRosCameraEnabled;
+  // A bridge is alive even though ROS camera mode is off. It holds the V4L2
+  // devices exclusively, so direct capture cannot open them — worth flagging
+  // loudly and offering a stop, but NOT worth reskinning the page over.
+  const strayBridge = bridgeRunning && !ioRosCameraEnabled;
 
   // Attach form state
   const [selectedDeviceIndex, setSelectedDeviceIndex] = useState<string>("");
@@ -80,33 +87,65 @@ const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ is
   const streamRef = useRef<MediaStream | null>(null);
   const [previewDeviceId, setPreviewDeviceId] = useState<string | null>(null);
 
-  // Load mappings + bridge status on mount
+  // Load mappings + bridge status on mount.
+  //
+  // Each source is applied INDEPENDENTLY (allSettled, not all). With Promise.all
+  // a single blip on any one endpoint threw before any setState ran, so all six
+  // values silently kept their previous poll's contents — including right after
+  // a start/stop toggle, which left the header contradicting the toast it had
+  // just shown. A failure now only leaves that one source stale, and surfaces
+  // instead of vanishing.
   const refresh = useCallback(async () => {
-    try {
-      const [mRes, bRes, ioRes] = await Promise.all([
-        fetchWithHeaders(`${baseUrl}/ros-camera-mappings`),
-        fetchWithHeaders(`${baseUrl}/ros-camera-bridge/status`),
-        fetchWithHeaders(`${baseUrl}/io-config`),
-      ]);
-      const mData = await mRes.json();
-      const bData = await bRes.json();
-      const ioData = await ioRes.json();
-      setMappings(mData.mappings || []);
-      setBridgeRunning(bData.running || false);
-      setBridgePid(bData.pid || null);
+    const readJson = async (path: string) => {
+      const res = await fetchWithHeaders(`${baseUrl}${path}`);
+      if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+      return res.json();
+    };
+    const [mapRes, bridgeRes, ioRes] = await Promise.allSettled([
+      readJson("/ros-camera-mappings"),
+      readJson("/ros-camera-bridge/status"),
+      readJson("/io-config"),
+    ]);
+
+    if (mapRes.status === "fulfilled" && Array.isArray(mapRes.value.mappings)) {
+      setMappings(mapRes.value.mappings);
+    }
+
+    const bData = bridgeRes.status === "fulfilled" ? bridgeRes.value : null;
+    if (bData) {
+      setBridgeRunning(!!bData.running);
+      setBridgePid(bData.pid ?? null);
       // The bridge can die on its own between polls -- a stale PID badge
       // is exactly what looked like a running bridge in a blank-preview
       // recording. died_unexpectedly + log_tail come straight from the
       // backend's log file, which survives the crash even though pgrep no
       // longer finds the process.
       setBridgeCrash(bData.died_unexpectedly ? (bData.log_tail || []) : null);
-      // A running bridge means ROS mode regardless of the saved preference:
-      // it holds the V4L2 devices, so direct capture cannot open them.
-      setRosCameraMode(!!ioData.ros_camera || !!ioData.ros_camera_running || !!bData.running);
-      setIoRosCameraEnabled(!!ioData.ros_camera);
-    } catch {
-      // ignore transient errors
     }
+
+    if (ioRes.status === "fulfilled") {
+      // Presentation follows the PERSISTED preference only — never live process
+      // detection. Deriving it from "is a bridge running" made the whole page
+      // reskin itself between ROS and direct wording every time the bridge died
+      // or a teleop restart relaunched it, which read as the page flickering
+      // between two different designs. A stray bridge is now reported as an
+      // anomaly banner (see strayBridge) instead of silently redefining the mode.
+      setIoRosCameraEnabled(!!ioRes.value.ros_camera);
+    }
+
+    const failed = [
+      mapRes.status === "rejected" && "camera mappings",
+      bridgeRes.status === "rejected" && "bridge status",
+      ioRes.status === "rejected" && "I/O config",
+    ].filter(Boolean) as string[];
+    if (failed.length > 0) {
+      setStaleSources(failed);
+    } else {
+      setStaleSources([]);
+    }
+    // Deliberately NOT depending on bridgeRunning: it is read through a ref
+    // above. As a dependency it would give refresh a new identity on every
+    // bridge state change, re-firing the mount effect that calls refresh().
   }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
@@ -228,11 +267,64 @@ const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ is
     }
   };
 
+  // Re-open the already-attached devices, without touching the mappings.
+  //
+  // This is the "the plug went loose mid-episode and the buzzer is going" path:
+  // the camera is still in the same physical port, so nothing needs re-attaching
+  // — the reader just has to open it again. Doing that previously required going
+  // through Attach Camera (re-selecting device + slot) purely as a side effect of
+  // the attach handler calling this same endpoint, which is a lot of clicking
+  // while a recording is paused and waiting.
+  const handleReconnect = async () => {
+    setReconnecting(true);
+    try {
+      const res = await fetchWithHeaders(`${baseUrl}/reconnect-cameras`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      await refresh();
+
+      if (data.success) {
+        toast({
+          title: "Cameras reconnected",
+          description: data.message || "Frames are flowing again.",
+        });
+        return;
+      }
+      // "Recording not active" is not a failure worth alarming about: outside a
+      // session there is no live robot holding the devices, so there is nothing
+      // to reconnect and the next recording will open them fresh anyway.
+      const idle = typeof data.message === "string" && data.message.includes("not active");
+      toast({
+        title: idle ? "No active recording" : "Reconnect did not recover every camera",
+        description: idle
+          ? "Nothing to reconnect — the next recording will open the cameras fresh."
+          : data.message || data.detail || "See the lelab log for details.",
+        variant: idle ? undefined : "destructive",
+      });
+    } catch {
+      toast({ title: "Could not reach the backend", variant: "destructive" });
+    } finally {
+      setReconnecting(false);
+    }
+  };
+
   const handleDetach = async (name: string) => {
     try {
       const res = await fetchWithHeaders(`${baseUrl}/ros-camera-mappings/${name}`, { method: "DELETE" });
-      const data = await res.json();
-      setMappings(data.mappings || []);
+      const data = await res.json().catch(() => ({}));
+      // Check the response before trusting its body. `data.mappings || []` on an
+      // error payload (which has `detail`, no `mappings`) wiped the whole camera
+      // list in the UI while the backend still had every mapping — and reported
+      // success for a delete that never happened.
+      if (!res.ok || !Array.isArray(data.mappings)) {
+        toast({
+          title: "Could not detach camera",
+          description: data.detail || data.message || "The camera list was left unchanged.",
+          variant: "destructive",
+        });
+        await refresh();  // resync from the backend rather than guessing
+        return;
+      }
+      setMappings(data.mappings);
       toast({ title: "Camera detached", description: `${SLOT_LABELS[name as CameraSlotName]} removed` });
     } catch {
       toast({ title: "Error detaching camera", variant: "destructive" });
@@ -316,19 +408,17 @@ const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ is
                 Direct capture
               </span>
             )}
-            {bridgeRunning && bridgePid && (
+            {rosCameraMode && bridgeRunning && bridgePid && (
               <span className="text-xs text-gray-500 font-mono">PID {bridgePid}</span>
             )}
-            {/* The bridge control only exists when a bridge is relevant. With
-                ROS camera mode off, recording opens the V4L2 devices itself and
-                there is nothing to start, so a "Start Bridge" button there is
-                dead UI that only invites a wrong click.
-
-                `bridgeRunning` still surfaces STOP even when the I/O preference
-                says off: a bridge alive in that state holds the devices
-                exclusively and would block direct capture, so it must always be
-                stoppable rather than silently tolerated. */}
-            {(ioRosCameraEnabled || bridgeRunning) && (
+            {/* Only present when ROS camera mode is actually the chosen path.
+                With it off there is nothing to start — recording opens the V4L2
+                devices itself — so a bridge button here would be dead UI that
+                only invites a wrong click. A bridge that IS somehow running
+                while the mode is off gets its own stop button in the stray-bridge
+                banner below, so it stays stoppable without this control having to
+                appear and disappear as processes come and go. */}
+            {rosCameraMode && (
               <Button
                 onClick={handleBridgeToggle}
                 disabled={bridgeLoading || (!bridgeRunning && mappings.length === 0)}
@@ -350,7 +440,7 @@ const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ is
             )}
           </div>
         </div>
-        {!rosCameraMode && !ioRosCameraEnabled && (
+        {!ioRosCameraEnabled && (
           <div className="max-w-7xl mx-auto px-0 pt-2 text-xs text-gray-500">
             ROS camera mode is off — recording will read cameras directly. To use
             the bridge instead, enable it on the{" "}
@@ -367,6 +457,43 @@ const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ is
           Start) so a stale "running" impression can't persist across a poll
           gap the way it did when this was only visible via a log file nobody
           checked mid-recording. */}
+      {/* A bridge is running while ROS camera mode is off. Reported as an
+          anomaly to resolve — not by silently switching the page into ROS mode,
+          which is what made this page appear to flip between two designs. */}
+      {strayBridge && (
+        <div className="px-6 py-3 border-b bg-amber-950/40 border-amber-800/60">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+            <div className="flex items-center gap-2 text-sm text-amber-300">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                A ROS camera bridge is running{bridgePid ? ` (PID ${bridgePid})` : ""} even
+                though ROS camera mode is off. It holds the cameras exclusively, so
+                direct capture cannot open them — stop it before recording.
+              </span>
+            </div>
+            <Button
+              onClick={handleBridgeToggle}
+              disabled={bridgeLoading}
+              size="sm"
+              className="shrink-0 bg-red-600/80 hover:bg-red-600 text-white border border-red-500/50"
+            >
+              {bridgeLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4 mr-1" />}
+              Stop Bridge
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {staleSources.length > 0 && (
+        <div className="px-6 py-2 border-b bg-amber-950/30 border-amber-900/50">
+          <div className="max-w-7xl mx-auto flex items-center gap-2 text-xs text-amber-300">
+            <AlertTriangle className="w-3.5 h-3.5" />
+            Could not refresh {staleSources.join(", ")} — showing the last known
+            value. Check that the backend is reachable.
+          </div>
+        </div>
+      )}
+
       {bridgeCrash && (
         <div className="px-6 py-3 border-b bg-red-950/40 border-red-800/60">
           <div className="max-w-7xl mx-auto">
@@ -558,14 +685,35 @@ const CameraSetup: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({ is
                   : `${mappings.length} camera${mappings.length > 1 ? "s" : ""} attached`}
               </p>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={refresh}
-              className="border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 hover:bg-gray-800"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </Button>
+            <div className="flex items-center gap-2">
+              {/* Recovery for a camera that dropped while still plugged into the
+                  same port: re-opens the devices from the existing mappings, so
+                  there is nothing to re-select. Deliberately prominent — this is
+                  reached mid-episode with the freeze buzzer going. */}
+              {mappings.length > 0 && (
+                <Button
+                  onClick={handleReconnect}
+                  disabled={reconnecting}
+                  className="bg-amber-600 hover:bg-amber-500 text-white font-semibold"
+                >
+                  {reconnecting ? (
+                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Plug className="w-4 h-4 mr-2" />
+                  )}
+                  Reconnect Cameras
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={refresh}
+                title="Refresh this page's data"
+                className="border-gray-700 text-gray-400 hover:text-white hover:border-gray-500 hover:bg-gray-800"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </Button>
+            </div>
           </div>
 
           {mappings.length === 0 ? (

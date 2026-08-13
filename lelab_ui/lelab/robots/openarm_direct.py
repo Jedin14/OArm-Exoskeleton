@@ -189,6 +189,7 @@ class OpenArmDirectRobot(OpenArmRosRobot):
         self._cam_reader = None
         self._direct_lock = threading.Lock()
         self._direct_diag: dict[str, float] = {}
+        self._gripper_closed_cache: dict[str, float] | None = None
 
         # Resolve devices ONCE, here rather than in connect(): LeRobot reads
         # observation_features to build the dataset schema before the robot is
@@ -241,7 +242,16 @@ class OpenArmDirectRobot(OpenArmRosRobot):
         sides = ("left", "right") if self.config.arm_mode == "both" else (self.config.arm_mode,)
         for side in sides:
             ch = self.direct_config.right_can if side == "right" else self.direct_config.left_can
-            reader = StateReader(ch, list(self.direct_config.recv_ids), DM4310, fd=True)
+            # Per-motor limits, NOT one profile for all eight. This arm mixes
+            # DM8009 / DM4340 / DM4310 (t_max 54 / 28 / 10 Nm), so decoding
+            # everything as DM4310 under-reports J1-J4 torque by up to 5.4x.
+            # Position was unaffected (identical p_max), which is exactly why
+            # the position validation passed while torque was wrong.
+            limits = {
+                cid: io.OPENARM_MOTOR_LIMITS.get(cid & 0xFF, DM4310)
+                for cid in self.direct_config.recv_ids
+            }
+            reader = StateReader(ch, list(self.direct_config.recv_ids), limits, fd=True)
             reader.start()
             self._state_readers[side] = reader
             logger.info("direct state: passive CAN reader on %s for %s arm", ch, side)
@@ -269,7 +279,7 @@ class OpenArmDirectRobot(OpenArmRosRobot):
         super().disconnect()
 
     # -- unit conversion ---------------------------------------------------
-    def _gripper_motor_to_m(self, motor_rad: float) -> float:
+    def _gripper_motor_to_m(self, motor_rad: float, side: str = "right") -> float:
         """
         Motor radians -> aperture metres. SIGN-AGNOSTIC, deliberately.
 
@@ -300,10 +310,38 @@ class OpenArmDirectRobot(OpenArmRosRobot):
         0.044 * (0.9908 / 1.0472) = 0.0416 m, exactly as measured.
         """
         cfg = self.direct_config
-        frac = abs(float(motor_rad) - cfg.gripper_closed_motor_rad) / abs(
-            cfg.gripper_open_motor_delta_rad
-        )
+        closed = self._gripper_closed_rad(side)
+        frac = abs(float(motor_rad) - closed) / abs(cfg.gripper_open_motor_delta_rad)
         return float(np.clip(frac, 0.0, 1.0)) * cfg.gripper_max_m
+
+    def _gripper_closed_rad(self, side: str) -> float:
+        """Closed-gripper motor angle for one arm, from gripper_home.yaml.
+
+        deploy_act_policy.py reads that file (load_gripper_homes) and this path
+        did not -- it assumed 0.0 rad. The file says 0.0967 (left) / 0.2157
+        (right), so observation.state's gripper was offset from the value deploy
+        computes for the SAME pose by ~4mm on the left and ~9mm on the right.
+        A policy would train on one encoding of "closed" and run on another,
+        which is precisely the train/deploy gap this backend exists to remove.
+
+        Cached: the file is read once per session, not per frame.
+        """
+        if self._gripper_closed_cache is None:
+            try:
+                from lelab.motors import gripper_closed_offsets
+
+                self._gripper_closed_cache = gripper_closed_offsets()
+            except Exception as e:
+                logger.warning(
+                    "cannot load gripper_home.yaml (%s); falling back to the "
+                    "configured %.4f rad for both arms",
+                    e, self.direct_config.gripper_closed_motor_rad,
+                )
+                self._gripper_closed_cache = {}
+            logger.info("gripper closed offsets: %s", self._gripper_closed_cache)
+        return float(
+            self._gripper_closed_cache.get(side, self.direct_config.gripper_closed_motor_rad)
+        )
 
     def _clamp_gripper_action_m(self, value: float) -> float:
         """Clamp a gripper action already expressed in metres.
@@ -330,10 +368,26 @@ class OpenArmDirectRobot(OpenArmRosRobot):
         names = self.config.joint_names
 
         # Cameras first: their capture time is the sync reference.
+        #
+        # Bind the reader to a local ONCE. reconnect_cameras() runs on the HTTP
+        # thread and sets self._cam_reader = None before building a replacement,
+        # so re-reading the attribute per camera (after an `is not None` guard
+        # that already passed) raced with that and raised AttributeError on
+        # None.latest() -- killing the record loop mid-episode, triggered by the
+        # very reconnect that was supposed to rescue the recording. A local
+        # reference keeps using the old reader for this one observation, which is
+        # correct: it is either still delivering frames or its cameras report
+        # None and get zero-filled below.
+        reader = self._cam_reader
         frames: dict[str, tuple] = {}
-        if self._cam_reader is not None:
+        if reader is not None:
             for cam in self._direct_camera_names():
-                frame, ts = self._cam_reader.latest(cam, rgb=True)
+                try:
+                    frame, ts = reader.latest(cam, rgb=True)
+                except (KeyError, AttributeError):
+                    # Camera dropped from the reader's map by a concurrent
+                    # reconnect that re-read the mappings file; zero-filled below.
+                    continue
                 if frame is not None:
                     frames[cam] = (frame, ts)
 
@@ -365,7 +419,7 @@ class OpenArmDirectRobot(OpenArmRosRobot):
                 continue
             idx = i % 8
             raw = float(vec[idx]) if idx < len(vec) else 0.0
-            obs[f"{name}.pos"] = self._gripper_motor_to_m(raw) if "finger" in name else raw
+            obs[f"{name}.pos"] = self._gripper_motor_to_m(raw, side) if "finger" in name else raw
 
         now = time.monotonic()
         for cam in self._direct_camera_names():
@@ -431,6 +485,36 @@ class OpenArmDirectRobot(OpenArmRosRobot):
         if ok:
             with self._frames_lock:
                 self._latest_frames[cam] = buf.tobytes()
+
+    def refresh_preview(self) -> None:
+        """Update the preview JPEGs and freeze flags WITHOUT recording a row.
+
+        Called by the recorder while it is paused. Everything that keeps the
+        dashboard alive normally happens inside get_observation(), which the
+        pause loop never calls, so the preview froze the moment recording paused
+        and the operator had no way to see whether a camera had come back.
+
+        It also breaks a deadlock. `_camera_frozen` was likewise only ever
+        written by get_observation(), and the pause loop auto-resumes on
+        `_freeze_paused and not _cameras_frozen()` — so a freeze-induced pause
+        could never clear itself, because the flag it waits on was only updated
+        by the loop it had stopped. Refreshing here lets a camera that recovers
+        on its own resume the recording.
+        """
+        reader = self._cam_reader
+        if reader is None:
+            return
+        now = time.monotonic()
+        for cam in self._direct_camera_names():
+            try:
+                frame, ts = reader.latest(cam, rgb=True)
+            except (KeyError, AttributeError):
+                continue
+            if frame is None:
+                self._camera_frozen[cam] = True
+                continue
+            self._camera_frozen[cam] = (now - ts) > self._camera_stale_s
+            self._publish_preview(cam, frame, now)
 
     # -- diagnostics -------------------------------------------------------
     def get_sync_diagnostics(self) -> dict:
@@ -513,13 +597,20 @@ class OpenArmDirectRobot(OpenArmRosRobot):
                     "device because the dataset schema still requires it", slot,
                 )
 
-            if self._cam_reader is not None:
+            # Stop the old reader but leave self._cam_reader pointing at it until
+            # a replacement exists, then swap in one assignment. Nulling it first
+            # left a window where a concurrent get_observation() saw None and
+            # zero-filled every image; the V4L2 devices are already released by
+            # stop(), so the old object simply returns None frames in that window
+            # instead of vanishing.
+            old_reader = self._cam_reader
+            if old_reader is not None:
                 try:
-                    self._cam_reader.stop()
+                    old_reader.stop()
                 except Exception as e:
                     logger.warning("camera reader stop failed: %s", e)
-                self._cam_reader = None
             if not self._camera_devices:
+                self._cam_reader = None
                 return {}
             try:
                 self._cam_reader = _direct_io_module().CameraReader(
@@ -528,6 +619,7 @@ class OpenArmDirectRobot(OpenArmRosRobot):
                 logger.info("direct cameras reconnected: %s", self._camera_devices)
             except Exception as e:
                 logger.error("camera reconnect failed: %s", e)
+                self._cam_reader = None  # old one is stopped; nothing usable left
                 return dict.fromkeys(self._camera_devices, False)
             for cam, dev in self._camera_devices.items():
                 self._camera_usb_paths[cam] = str(dev)

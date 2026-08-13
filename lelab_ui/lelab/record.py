@@ -619,14 +619,17 @@ def _ros_camera_bridge_enabled() -> bool:
     are exclusive, so whoever holds them decides how frames can be read. A stale
     `ros_camera: true` in io_config.json with no bridge running must not stop
     direct capture from opening the cameras.
-    """
-    import subprocess
 
+    Uses /proc, NOT `pgrep -f` (see lelab.utils.procs). pgrep matched any process
+    whose command line merely contained the script name — including the UI's own
+    concurrent bridge-status probes — so this could return True with no bridge
+    running, silently selecting the ROS backend for the recording. That records
+    from ROS topics nobody publishes: no camera frames at all, which is exactly
+    the "cameras don't show up while recording" failure.
+    """
     try:
-        return subprocess.run(
-            ["pgrep", "-f", "openarm_camera_bridge_node.py"],
-            capture_output=True,
-        ).returncode == 0
+        from lelab.utils.procs import camera_bridge_pids
+        return bool(camera_bridge_pids())
     except Exception as e:
         logger.warning(f"Cannot determine ROS camera bridge state ({e}); assuming direct capture")
         return False
@@ -917,6 +920,10 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
             "exit_early": False,  # Right arrow key -> "Skip to next episode" button
             "stop_recording": False,  # ESC key -> "Stop recording" button
             "rerecord_episode": False,  # Left arrow key -> "Re-record episode" button
+            # Set alongside rerecord_episode by handle_rerecord_episode(); True
+            # only for the exoskeleton's physical button. See that function's
+            # docstring for why the UI path never gets this.
+            "_rerecord_allow_home_bypass": False,
             "current_task": request.single_task,
             "persistent_left_lock": global_persistent_locks.get("left", False),
             "persistent_right_lock": global_persistent_locks.get("right", False),
@@ -985,9 +992,9 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                             if any(index in rising for index in (5, 11)):
                                 handle_exit_early()
                             elif any(index in rising for index in (6, 12)):
-                                handle_toggle_pause()
+                                handle_toggle_pause(source="exo")
                             elif any(index in rising for index in (7, 13)):
-                                handle_rerecord_episode()
+                                handle_rerecord_episode(source="exo")
                         last_buttons = btns
                     time.sleep(0.05)
             
@@ -1185,8 +1192,27 @@ def handle_exit_early() -> dict[str, Any]:
     }
 
 
-def handle_rerecord_episode() -> dict[str, Any]:
-    """Handle rerecord episode request - replaces left arrow key"""
+def handle_rerecord_episode(source: str = "ui") -> dict[str, Any]:
+    """Handle a rerecord request, from either the UI button or the exoskeleton's
+    physical C/white button (gamepad_poller).
+
+    `source` controls whether the episode-minimum bypass (see custom_record_loop)
+    is available. The two callers are not equivalent:
+
+    - Exoskeleton (source="exo"): the operator's hands are already off the
+      interface — there is no confirmation dialog, and if they haven't moved
+      from home yet, waiting out MIN_EPISODE_SECONDS for a re-record that
+      would discard nothing is a real, felt delay while wearing the suit.
+    - UI (source="ui", the default — matches existing callers): the operator
+      already goes through the Recording page's own dialog, which unlocks the
+      arms, has them manually guide it to an approximate home, then locks back
+      to exact home before this is ever called. Letting the backend's at-home
+      bypass ALSO fire here skipped the automated homing snap — the "manual
+      guide" is only approximate BY DESIGN (that's why the automated snap
+      exists at all), so bypassing it left the arm slightly off true home
+      instead of running the precise confirm. The UI path gets no bypass: it
+      always defers to and waits out the ordinary minimum.
+    """
     import time
     now = time.time()
     last_called = getattr(handle_rerecord_episode, "_last_called", 0)
@@ -1219,7 +1245,8 @@ def handle_rerecord_episode() -> dict[str, Any]:
 
     recording_events["rerecord_episode"] = True
     recording_events["exit_early"] = True
-    logger.info("Re-record episode triggered")
+    recording_events["_rerecord_allow_home_bypass"] = (source == "exo")
+    logger.info("Re-record episode triggered (source=%s)", source)
     return {
         "success": True,
         "message": "Re-record episode requested successfully",
@@ -1591,11 +1618,32 @@ def custom_custom_record_loop(
         current_pause_duration = (time.perf_counter() - pause_start_t) if is_paused else 0.0
         timestamp = time.perf_counter() - start_episode_t - total_paused_time - current_pause_duration
 
-def handle_toggle_pause() -> dict:
-    """Toggle pause state of recording"""
+def handle_toggle_pause(source: str = "ui") -> dict:
+    """Toggle pause state of recording.
+
+    `source="exo"` (the exoskeleton's physical B button) is accepted ONLY during
+    the reset phase. Pausing mid-episode from the suit is a foot-gun: the button
+    is easy to catch while manipulating, and a pause there freezes the episode
+    clock with the arms live, so the operator keeps moving while nothing is being
+    recorded. Reset is where a pause is actually useful — it holds the "get
+    ready" countdown while the scene is rearranged.
+
+    The UI button (`source="ui"`, the default) keeps both phases: it takes a
+    deliberate click, and the on-screen state makes an active pause obvious.
+    """
     global recording_events, current_phase
     if not recording_active or recording_events is None:
         return {"success": False, "message": "No recording session is active"}
+    if source == "exo" and current_phase != "resetting":
+        logger.info(
+            "Ignoring exoskeleton pause press during %s phase (allowed in reset only)",
+            current_phase,
+        )
+        return {
+            "success": False,
+            "message": f"The exoskeleton pause button only works during the reset phase (currently {current_phase})",
+            "current_phase": current_phase,
+        }
     if current_phase not in ("recording", "resetting"):
         return {"success": False, "message": "Can only pause during recording or resetting phase"}
     current_state = recording_events.get("pause_recording", False)
@@ -1725,6 +1773,18 @@ def custom_record_loop(
             if phase_start_time is not None:
                 phase_start_time += 0.1
 
+            # Keep the camera feeds live while paused. Without this the dashboard
+            # preview froze on the last frame before the pause, so the operator
+            # could not see whether a camera had recovered — and, for the direct
+            # backend, the freeze flags this loop waits on were only ever updated
+            # inside get_observation(), which a pause stops calling. That made a
+            # freeze-induced pause unable to auto-resume at all.
+            if hasattr(robot, "refresh_preview"):
+                try:
+                    robot.refresh_preview()
+                except Exception as e:
+                    logger.debug("preview refresh while paused failed: %s", e)
+
             # Auto-resume once the camera freeze that triggered this pause has
             # cleared (the auto-recovery watchdog reconnects stalled cameras in
             # the background). We only auto-resume freeze-induced pauses — a
@@ -1790,10 +1850,20 @@ def custom_record_loop(
                 # when the arm has not left home: there is no motion to truncate
                 # and nothing worth keeping, so a re-record runs immediately
                 # instead of making the operator wait out the countdown.
-                if events.get("rerecord_episode") and _at_home_pose(
-                    events.get("current_robot_state"),
-                    events.get("target_home_state"),
-                    events.get("_arm_mode", "both"),
+                #
+                # Exoskeleton-only (_rerecord_allow_home_bypass, set in
+                # handle_rerecord_episode): the UI path already ran its own
+                # manual-guide-to-home dialog before calling in, and that guide
+                # is only approximate, so bypassing the automated homing snap
+                # here on top of it would leave the arm slightly off true home.
+                if (
+                    events.get("rerecord_episode")
+                    and events.get("_rerecord_allow_home_bypass")
+                    and _at_home_pose(
+                        events.get("current_robot_state"),
+                        events.get("target_home_state"),
+                        events.get("_arm_mode", "both"),
+                    )
                 ):
                     logger.info(
                         "Re-record %.2fs into the episode with the arm still at home; "
@@ -2573,6 +2643,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
                     # inside the episode minimum cannot fire again after this
                     # attempt has already been discarded.
                     web_events["_rerecord_pending"] = False
+                    web_events["_rerecord_allow_home_bypass"] = False
                     _discard_episode_attempt(dataset)
 
                     # Go through reset phase before re-recording (don't increment episode counters)

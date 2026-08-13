@@ -9,6 +9,11 @@
 4. 启动时先从当前姿态平滑回零（home），再进入跟随模式
 """
 
+import json
+import os
+import time
+from pathlib import Path
+
 import numpy as np
 import rclpy
 import yaml
@@ -59,6 +64,10 @@ class ExoskeletonBridgeNode(Node):
         # the arm joints, so there is no goal to rate-limit, and closing force is
         # set by GRIPPER_DEFAULT_KP/KD in v10_simple_hardware.hpp (20.0 / 2.5)
         # rather than by a per-goal max_effort.
+        # CAN interfaces, used only to read gripper torque for the force cap
+        # (passive/read-only). Defaults match openarm_teleop.sh's RIGHT_CAN/LEFT_CAN.
+        self.declare_parameter('right_can_interface', 'can0')
+        self.declare_parameter('left_can_interface', 'can1')
         self.declare_parameter('gripper_min_position_m', 0.0)
         self.declare_parameter('gripper_max_position_m', 0.050)
         self.declare_parameter('gripper_close_extra_m', 0.0)
@@ -97,6 +106,8 @@ class ExoskeletonBridgeNode(Node):
         self.joint_max_delta_per_sec = max(0.05, float(self.get_parameter('joint_max_delta_per_sec').value))
         self.gripper_smoothing_alpha = float(np.clip(self.get_parameter('gripper_smoothing_alpha').value, 0.01, 1.0))
         self.gripper_max_delta_per_sec = max(0.002, float(self.get_parameter('gripper_max_delta_per_sec').value))
+        self.right_can_interface = str(self.get_parameter('right_can_interface').value)
+        self.left_can_interface = str(self.get_parameter('left_can_interface').value)
         self.gripper_min_position_m = float(self.get_parameter('gripper_min_position_m').value)
         self.gripper_max_position_m = float(self.get_parameter('gripper_max_position_m').value)
         if self.gripper_max_position_m <= self.gripper_min_position_m:
@@ -140,6 +151,18 @@ class ExoskeletonBridgeNode(Node):
         # recorder use one unit without duplicating this scale factor.
         self.gripper_cmd_m_pub = self.create_publisher(Float64MultiArray, '/exo/gripper_command_m', 10)
 
+        # What this node believes about the force cap, so the UI can state it as a
+        # FACT instead of inferring it. Layout, NaN where not applicable:
+        #   [left_cap, right_cap, left_hold, right_hold, left_torque, right_torque]
+        #
+        # Added because "the limit is not being enforced" was only ever a deduction
+        # from peak torque -- there was no way to tell an unarmed cap from an armed
+        # cap that was being outrun. Those need completely different fixes, so the
+        # UI has to be able to distinguish them.
+        self.gripper_cap_state_pub = self.create_publisher(
+            Float64MultiArray, '/exo/gripper_cap_state', 10
+        )
+
         # No gripper ActionClient: the finger joint is published as the 8th
         # entry of the forward position controller command (see _publish_arm).
 
@@ -147,6 +170,59 @@ class ExoskeletonBridgeNode(Node):
         self.input_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
         self.input_gripper = {'left': 0.0, 'right': 0.0}
         self.have_input = {'left': False, 'right': False}
+        # Whether a real trigger value has ever arrived for this side. input_gripper
+        # is pre-seeded to 0.0, which is indistinguishable from a genuine
+        # fully-closed reading -- see gripper_cmd_m_pub.
+        self._gripper_reported = {'left': False, 'right': False}
+        # Aperture floor per side while a force limit is latched (metres), or
+        # None for unlimited. Set from the UI via set_gripper_limit; see where it
+        # is applied in _update_input_from_arm_msg.
+        self.gripper_limit_m = {'left': None, 'right': None}
+        # How far past the hold the operator must open before it is dropped. Big
+        # enough not to chatter on trigger noise while a force hold is active,
+        # small enough that easing off visibly re-arms the gripper.
+        self.gripper_limit_release_m = 0.002   # 2 mm
+
+        # Closing-torque cap per side (Nm), or None. Enforced IN THE CONTROL LOOP
+        # against a locally-read CAN torque, not from lelab.
+        #
+        # An earlier version had lelab watch torque and publish an aperture floor
+        # over ROS. That round trip is ~20-40ms, and by the time the floor landed
+        # the gripper had already squeezed well past the cap -- measured 6.84 Nm
+        # against a 4.49 Nm cap. Enforcement has to sit where the command is
+        # produced, at control rate, or it is always chasing.
+        self.gripper_torque_cap_nm = self._load_persisted_torque_caps()
+        self._gripper_torque_readers = {}
+        self._gripper_torque_nm = {'left': 0.0, 'right': 0.0}
+        # Release at a fraction of the cap so holding at the limit does not
+        # chatter between clamped and free on measurement noise.
+        self.gripper_torque_release_ratio = 0.85
+        # Above cap x this, the setpoint eases OPEN until the force falls back.
+        # 1.02 gives a 2% dead band so it settles at the cap instead of hunting
+        # across it every tick.
+        self.gripper_torque_backoff_ratio = 1.02
+        self.gripper_backoff_speed_m_s = 0.03   # 0.3mm per tick at 100Hz
+        # Closing speed while a torque cap is active (m/s).
+        #
+        # This is THE knob that sets how far past the cap the force can go, and it
+        # is a genuine trade-off, not a tuning detail. The clamp can only react on
+        # a tick boundary, so the force overshoot is roughly "one tick of setpoint
+        # travel" x the object's stiffness. gripper_max_delta_per_sec is 0.8 m/s
+        # here = 8mm per 100Hz tick, which against a stiff object is a large force
+        # step no software loop can catch.
+        #
+        # A torque-triggered "slow down near the cap" band was tried first and does
+        # not work: at 8mm/tick the measured torque goes from zero to well past the
+        # cap in a single step, so the band is never entered. The rate has to be
+        # limited BEFORE contact, which means whenever a cap is armed.
+        #
+        # 0.15 m/s = 1.5mm/tick: full 44mm travel in ~0.3s, still brisk. Lower it
+        # for tighter force control, raise it for faster closing.
+        self.declare_parameter('gripper_capped_close_speed_m_s', 0.15)
+        self.gripper_capped_close_speed_m_s = max(
+            0.005, float(self.get_parameter('gripper_capped_close_speed_m_s').value)
+        )
+        self._start_gripper_torque_readers()
 
         # Current measured robot state
         self.current_arm = {'left': None, 'right': None}
@@ -225,6 +301,48 @@ class ExoskeletonBridgeNode(Node):
             elif action == 'toggle_right_home':
                 self.right_fixed_home = bool(data.get('value', False))
                 self.get_logger().info(f"UI Command: Right arm home fixed = {self.right_fixed_home}")
+            elif action == 'set_gripper_torque_cap':
+                side = data.get('side')
+                cap = data.get('torque_nm')
+                if side in ('left', 'right') and cap:
+                    self.gripper_torque_cap_nm[side] = float(cap)
+                    self.gripper_limit_m[side] = None   # re-arm; hold engages on torque
+                    available = self._gripper_torque(side) is not None
+                    self.get_logger().info(
+                        f"UI Command: {side} gripper torque capped at {float(cap):.2f} Nm"
+                        + ("" if available else " (WARNING: no CAN torque available, cap cannot engage)")
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"UI Command: ignoring malformed set_gripper_torque_cap {data}"
+                    )
+            elif action == 'clear_gripper_torque_cap':
+                side = data.get('side')
+                if side in ('left', 'right'):
+                    self.gripper_torque_cap_nm[side] = None
+                    self.gripper_limit_m[side] = None
+                    self.get_logger().info(f"UI Command: {side} gripper torque cap released")
+            elif action == 'set_gripper_limit':
+                side = data.get('side')
+                aperture = data.get('aperture_m')
+                if side in ('left', 'right') and aperture is not None:
+                    bounded = float(np.clip(float(aperture),
+                                            self.gripper_min_position_m,
+                                            self.gripper_max_position_m))
+                    self.gripper_limit_m[side] = bounded
+                    self.get_logger().info(
+                        f"UI Command: {side} gripper force limit latched at {bounded:.4f} m "
+                        "(will not close further)"
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"UI Command: ignoring malformed set_gripper_limit {data}"
+                    )
+            elif action == 'clear_gripper_limit':
+                side = data.get('side')
+                if side in ('left', 'right'):
+                    self.gripper_limit_m[side] = None
+                    self.get_logger().info(f"UI Command: {side} gripper force limit released")
             elif action == 'home_all':
                 self.left_fixed_home = True
                 self.right_fixed_home = True
@@ -317,23 +435,23 @@ class ExoskeletonBridgeNode(Node):
             gripper_norm = float(np.clip(gripper_norm, 0.0, 1.0))
             if (side == 'left' and self.left_gripper_reverse) or (side == 'right' and self.right_gripper_reverse):
                 gripper_norm = 1.0 - gripper_norm
-            self.input_gripper[side] = float(
+            requested_m = float(
                 np.clip(
                     gripper_norm * self.gripper_scale,
                     self.gripper_min_position_m,
                     self.gripper_max_position_m
                 )
             )
-            # Mirror it in metres for the recorder (see gripper_cmd_m_pub).
-            # Published from here, not the control loop, so it is emitted at the
-            # trigger's own rate and carries the pre-smoothing target — the same
-            # quantity the arm joints' action channel carries.
-            msg_out = Float64MultiArray()
-            msg_out.data = [
-                float(self.input_gripper['left']),
-                float(self.input_gripper['right']),
-            ]
-            self.gripper_cmd_m_pub.publish(msg_out)
+            # The operator's UNCLAMPED intent. The force cap is NOT applied here
+            # any more: it is enforced in the control loop against locally-read
+            # torque (see _apply_gripper_torque_cap), because a cap applied to the
+            # trigger value alone cannot react to how hard the gripper is actually
+            # squeezing.
+            self.input_gripper[side] = requested_m
+            self._gripper_reported[side] = True
+            # The /exo/gripper_command_m mirror the recorder stores as `action` is
+            # published from the control loop, not here, so it carries the
+            # force-capped command rather than this raw intent.
 
     def joint_states_callback(self, msg: JointState):
         index_by_name = {name: idx for idx, name in enumerate(msg.name)}
@@ -357,6 +475,175 @@ class ExoskeletonBridgeNode(Node):
         blended = current + alpha * (target - current)
         delta = float(np.clip(blended - current, -max_delta, max_delta))
         return current + delta
+
+    def _load_persisted_torque_caps(self):
+        """Read the gripper torque caps from lelab's config file at startup.
+
+        THE CAP MUST NOT DEPEND ON A ROS HANDSHAKE. openarm_teleop.sh starts lelab
+        BEFORE this node, and lelab pushed the cap once over /exo/ui_command with
+        VOLATILE durability -- so if anything polled it before this node existed,
+        the message went to no subscriber and was never re-sent. This node then ran
+        with no cap at all, which is exactly the "limit is not being enforced"
+        symptom: the reader was up, the UI showed a cap, and nothing enforced it.
+
+        Reading the file makes the cap correct from the first control tick, in any
+        start order, with or without lelab running. lelab still publishes changes
+        for immediate effect.
+        """
+        caps = {'left': 5.0, 'right': 5.0}   # matches lelab's DEFAULT_GRIPPER_TORQUE_CAP_NM
+        path = Path.home() / ".config" / "lelab" / "motor_config.json"
+        try:
+            import json
+            with path.open() as fh:
+                stored = (json.load(fh) or {}).get("gripper_torque_cap_nm", {})
+            for side in ('left', 'right'):
+                if stored.get(side):
+                    caps[side] = float(stored[side])
+            self.get_logger().info(f"gripper torque caps loaded from {path}: {caps}")
+        except FileNotFoundError:
+            self.get_logger().info(f"no {path}; gripper torque caps default to {caps}")
+        except Exception as e:
+            self.get_logger().warn(f"cannot read {path} ({e}); caps default to {caps}")
+        return caps
+
+    def _start_gripper_torque_readers(self):
+        """Passive CAN listeners for the two gripper motors (recv id 0x18).
+
+        Read-only, so this cannot collide with ros2_control driving the same
+        motors. Failure is non-fatal: without torque the cap simply cannot
+        engage, and that is reported once rather than taking the node down.
+        """
+        import os
+        import sys
+
+        root = os.environ.get("OPENARM_REPO_ROOT") or str(
+            Path(__file__).resolve().parents[3]
+        )
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        try:
+            import openarm_direct_io as io
+        except Exception as e:
+            self.get_logger().warn(
+                f"openarm_direct_io unavailable ({e}); gripper torque cap disabled"
+            )
+            return
+
+        channels = {'right': self.right_can_interface, 'left': self.left_can_interface}
+        for side, channel in channels.items():
+            if not channel:
+                continue
+            try:
+                reader = io.StateReader(channel, [0x18], {0x18: io.DM4310}, fd=True)
+                reader.start()
+                self._gripper_torque_readers[side] = reader
+                self.get_logger().info(
+                    f"gripper torque reader on {channel} ({side}) for force limiting"
+                )
+            except Exception as e:
+                self.get_logger().warn(
+                    f"no gripper torque on {channel} ({side}): {e}; cap disabled for it"
+                )
+
+    def _gripper_torque(self, side):
+        """Latest |gripper torque| in Nm, or None when unavailable/stale."""
+        reader = self._gripper_torque_readers.get(side)
+        if reader is None:
+            return None
+        try:
+            fb = reader.latest_feedback().get(0x18)
+        except Exception:
+            return None
+        if fb is None:
+            return None
+        if time.monotonic() - fb.timestamp > 0.2:
+            return None   # bus quiet: do not clamp on a stale number
+        return abs(float(fb.torque))
+
+    def _apply_gripper_torque_cap(self, side, desired_gripper):
+        """Freeze closing once measured torque reaches the cap.
+
+        Returns the gripper command to actually publish. Opening is never
+        restricted -- only further CLOSING is refused, so the operator can always
+        let go. Below the release threshold the clamp lifts by itself, which is
+        what lets the gripper close again after the object is removed.
+        """
+        cap = self.gripper_torque_cap_nm.get(side)
+        if cap is None:
+            return desired_gripper
+
+        torque = self._gripper_torque(side)
+        if torque is None:
+            return desired_gripper
+
+        held = self.gripper_limit_m.get(side)
+
+        # OVER the cap: open back up until the force comes down.
+        #
+        # Freezing alone cannot fix an overshoot that has already happened, and it
+        # was measured happening constantly: at 8mm of setpoint travel per tick the
+        # command buries itself past the object in ONE tick, torque lands at ~7.5 Nm
+        # against a 5 Nm cap, and a pure freeze then holds that 7.5 Nm forever. To
+        # actually not exceed the cap the setpoint has to give ground.
+        #
+        # Deliberately a SLOW ramp with a dead band, not a jump to the measured
+        # aperture. Jumping there zeroes the force error outright, which collapses
+        # the force, trips the release threshold and re-closes -- the limit cycle
+        # reproduced earlier. Creeping open a fraction of a millimetre per tick and
+        # stopping inside the dead band settles at the cap instead.
+        if torque > cap * self.gripper_torque_backoff_ratio:
+            base = held if held is not None else float(self.cmd_gripper[side])
+            step = self.gripper_backoff_speed_m_s / max(1.0, self.control_rate_hz)
+            relieved = min(self.gripper_max_position_m, base + step)
+            self.gripper_limit_m[side] = relieved
+            if not getattr(self, '_backoff_logged', {}).get(side):
+                self._backoff_logged = getattr(self, '_backoff_logged', {})
+                self._backoff_logged[side] = True
+                self.get_logger().info(
+                    f"{side} gripper over cap ({torque:.2f} > {cap:.2f} Nm); "
+                    "easing open until the force drops"
+                )
+            return relieved
+
+        if torque >= cap:
+            # Freeze the COMMANDED setpoint, not the measured aperture.
+            #
+            # Closing force is KP x (commanded - measured), so freezing the
+            # command freezes the force: torque parks at the cap and stays there.
+            # Holding at the MEASURED aperture instead drives the setpoint back to
+            # where the fingers already are, which zeroes the error, collapses the
+            # force, trips the release threshold, and re-closes -- a limit cycle
+            # that buzzes the gripper (reproduced in simulation: the hold toggled
+            # every other tick).
+            #
+            # Freezing the command is only safe because this runs at control rate:
+            # the setpoint moves at most one rate-limited step (1.8mm at 0.18 m/s)
+            # past the trip point before it stops.
+            hold = float(self.cmd_gripper[side])
+            if held is None or hold > held:
+                self.gripper_limit_m[side] = hold
+                self.get_logger().info(
+                    f"{side} gripper reached {torque:.2f} Nm (cap {cap:.2f}); "
+                    f"holding at {hold:.4f} m"
+                )
+            held = self.gripper_limit_m[side]
+        elif held is not None and torque < cap * self.gripper_torque_release_ratio:
+            # Force has fallen well below the cap (object released, or the
+            # operator eased off): stop holding so full travel returns.
+            self.gripper_limit_m[side] = None
+            held = None
+
+        if held is not None and desired_gripper < held:
+            return held
+
+        # Cap armed: limit CLOSING speed so the force rise is sampleable and the
+        # freeze lands within about one tick of the cap. Opening is untouched --
+        # letting go must always be immediate.
+        current = float(self.cmd_gripper[side])
+        if desired_gripper < current:
+            step = self.gripper_capped_close_speed_m_s / max(1.0, self.control_rate_hz)
+            return max(desired_gripper, current - step)
+        return desired_gripper
 
     def _publish_arm(self, side, arm_values, gripper_value):
         """Publish the 7 arm joints AND the finger joint as one command array.
@@ -608,11 +895,74 @@ class ExoskeletonBridgeNode(Node):
             self.cmd_arm[side] = self._smooth_vector(
                 self.cmd_arm[side], desired_arm, effective_alpha, effective_joint_max_delta
             )
+            # Force cap on the FINAL command, at control rate, using locally-read
+            # torque. Applied after smoothing so what gets published is exactly
+            # what the cap allows — and because /exo/gripper_command_m mirrors
+            # this same value, the recorded `action` tops out here too.
+            desired_gripper = self._apply_gripper_torque_cap(side, desired_gripper)
             self.cmd_gripper[side] = self._smooth_scalar(
                 self.cmd_gripper[side], desired_gripper, self.gripper_smoothing_alpha, gripper_max_delta
             )
 
             self._publish_arm(side, self.cmd_arm[side], self.cmd_gripper[side])
+
+        # Mirror the COMMANDED gripper aperture in metres for the recorder, once
+        # per control tick for both sides. This is what lands in the dataset as
+        # `action`, so it must be the value actually sent to the controller --
+        # i.e. after the force cap and after smoothing -- not the operator's raw
+        # trigger. Published here rather than from the trigger callback for
+        # exactly that reason.
+        #
+        # NaN for a side that has never reported a trigger: cmd_gripper is seeded
+        # from the measured state, so a single-arm rig would otherwise publish a
+        # plausible-looking number for an arm nobody is driving and the recorder
+        # would store it as that gripper's action. NaN is unambiguous and the
+        # consumer skips it.
+        if any(self._gripper_reported.values()):
+            mirror = Float64MultiArray()
+            mirror.data = [
+                float(self.cmd_gripper[s]) if self._gripper_reported[s] else float('nan')
+                for s in ('left', 'right')
+            ]
+            self.gripper_cmd_m_pub.publish(mirror)
+
+        # Cap state, ~5Hz. Cheap, and it is the only way to know from outside
+        # whether this node actually has a cap armed and is reading torque.
+        self._cap_state_ticks = getattr(self, '_cap_state_ticks', 0) + 1
+        if self._cap_state_ticks % max(1, int(self.control_rate_hz // 5)) == 0:
+            nan = float('nan')
+            state = Float64MultiArray()
+            state.data = [
+                float(self.gripper_torque_cap_nm[s]) if self.gripper_torque_cap_nm[s] else nan
+                for s in ('left', 'right')
+            ] + [
+                float(self.gripper_limit_m[s]) if self.gripper_limit_m[s] is not None else nan
+                for s in ('left', 'right')
+            ] + [
+                (lambda t: nan if t is None else float(t))(self._gripper_torque(s))
+                for s in ('left', 'right')
+            ]
+            self.gripper_cap_state_pub.publish(state)
+            # Also to a file, because that is the channel lelab can actually read:
+            # its venv is python3.12 with no rclpy (which is why _send_ui_command
+            # falls back to a subprocess publisher), so a ROS topic can never reach
+            # it. Same approach openarm_camera_bridge_node.py already uses for
+            # /tmp/lelab_camera_status.json.
+            try:
+                import json
+                payload = {
+                    "updated_at": time.time(),
+                    "cap_nm": {s: self.gripper_torque_cap_nm[s] for s in ('left', 'right')},
+                    "hold_m": {s: self.gripper_limit_m[s] for s in ('left', 'right')},
+                    "torque_nm": {s: self._gripper_torque(s) for s in ('left', 'right')},
+                    "close_speed_m_s": self.gripper_capped_close_speed_m_s,
+                }
+                tmp = "/tmp/lelab_gripper_cap_state.json.tmp"
+                with open(tmp, "w") as fh:
+                    json.dump(payload, fh)
+                os.replace(tmp, "/tmp/lelab_gripper_cap_state.json")
+            except Exception:
+                pass   # diagnostics must never disturb the control loop
 
 
 def main(args=None):
