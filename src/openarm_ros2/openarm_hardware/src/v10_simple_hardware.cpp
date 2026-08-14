@@ -270,10 +270,29 @@ hardware_interface::return_type OpenArm_v10HW::write(
   openarm_->get_arm().mit_control_all(arm_params);
   // Control gripper if enabled
   if (hand_ && joint_names_.size() > ARM_DOF) {
-    // TODO the true mappings are unimplemented.
     double motor_command = joint_to_motor_radians(pos_commands_[ARM_DOF]);
+    const auto& gripper_motors = openarm_->get_gripper().get_motors();
+    double gripper_kp = GRIPPER_DEFAULT_KP;
+    double gripper_kd = GRIPPER_DEFAULT_KD;
+
+    if (!gripper_motors.empty()) {
+      const double motor_position = gripper_motors[0].get_position();
+      const double closing_error = motor_command - motor_position;
+
+      if (closing_error > 0.0) {
+        // In MIT position control, the proportional contribution is
+        // Kp * (q_command - q_actual).  Scaling Kp by the current closing
+        // error limits that requested torque before a CAN feedback sample can
+        // report a contact spike.  Do not add Kd while closing: damping torque
+        // would bypass this proportional force budget.
+        gripper_kp = std::min(
+            GRIPPER_DEFAULT_KP,
+            GRIPPER_CLOSING_TORQUE_LIMIT_NM / closing_error);
+        gripper_kd = 0.0;
+      }
+    }
     openarm_->get_gripper().mit_control_all(
-        {{GRIPPER_DEFAULT_KP, GRIPPER_DEFAULT_KD, motor_command, 0, 0}});
+        {{gripper_kp, gripper_kd, motor_command, 0, 0}});
   }
   openarm_->recv_all(1000);
   return hardware_interface::return_type::OK;

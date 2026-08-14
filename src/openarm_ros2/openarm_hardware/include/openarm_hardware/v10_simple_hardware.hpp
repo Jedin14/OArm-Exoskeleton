@@ -125,6 +125,14 @@ class OpenArm_v10HW : public hardware_interface::SystemInterface {
   const double GRIPPER_DEFAULT_KP = 20.0;
   const double GRIPPER_DEFAULT_KD = 2.5;
 
+  // The position controller previously sent Kp=20 and Kd=2.5 even while the
+  // fingers were closing on an object.  A full position error can therefore
+  // request the DM4310's entire torque range before the 100 Hz ROS feedback
+  // loop can intervene.  Keep 0.2 Nm below the 2.0 Nm user-facing limit for
+  // CAN/control latency.  This is a motor-torque limit, not a calibrated jaw
+  // force in Newtons.
+  const double GRIPPER_CLOSING_TORQUE_LIMIT_NM = 1.8;
+
   // Configuration
   std::string can_interface_;
   std::string arm_prefix_;

@@ -11,6 +11,8 @@
 
 import json
 import os
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -178,10 +180,10 @@ class ExoskeletonBridgeNode(Node):
         # None for unlimited. Set from the UI via set_gripper_limit; see where it
         # is applied in _update_input_from_arm_msg.
         self.gripper_limit_m = {'left': None, 'right': None}
-        # How far past the hold the operator must open before it is dropped. Big
-        # enough not to chatter on trigger noise while a force hold is active,
-        # small enough that easing off visibly re-arms the gripper.
-        self.gripper_limit_release_m = 0.002   # 2 mm
+        # Release the virtual trigger exactly when the operator opens past the
+        # held aperture.  While their request is still more closed than that
+        # aperture, the recorded action remains pinned at the contact point.
+        self.gripper_limit_release_m = 0.0
 
         # Closing-torque cap per side (Nm), or None. Enforced IN THE CONTROL LOOP
         # against a locally-read CAN torque, not from lelab.
@@ -194,35 +196,57 @@ class ExoskeletonBridgeNode(Node):
         self.gripper_torque_cap_nm = self._load_persisted_torque_caps()
         self._gripper_torque_readers = {}
         self._gripper_torque_nm = {'left': 0.0, 'right': 0.0}
-        # Release at a fraction of the cap so holding at the limit does not
-        # chatter between clamped and free on measurement noise.
-        self.gripper_torque_release_ratio = 0.85
-        # Above cap x this, the setpoint eases OPEN until the force falls back.
-        # 1.02 gives a 2% dead band so it settles at the cap instead of hunting
-        # across it every tick.
-        self.gripper_torque_backoff_ratio = 1.02
-        self.gripper_backoff_speed_m_s = 0.03   # 0.3mm per tick at 100Hz
-        # Closing speed while a torque cap is active (m/s).
+        # The hardware closing-force limiter holds at about 1.8 Nm for a 2.0 Nm
+        # UI cap.  Latch the command at 1.75 Nm so the mirrored dataset action
+        # freezes at contact even though the hardware deliberately never drives
+        # all the way to the UI cap.
+        self.declare_parameter('gripper_torque_tolerance_nm', 0.25)
+        self.gripper_torque_tolerance_nm = max(
+            0.0, float(self.get_parameter('gripper_torque_tolerance_nm').value)
+        )
+
+        # Closing speed while a torque cap is armed.
         #
-        # This is THE knob that sets how far past the cap the force can go, and it
-        # is a genuine trade-off, not a tuning detail. The clamp can only react on
-        # a tick boundary, so the force overshoot is roughly "one tick of setpoint
-        # travel" x the object's stiffness. gripper_max_delta_per_sec is 0.8 m/s
-        # here = 8mm per 100Hz tick, which against a stiff object is a large force
-        # step no software loop can catch.
+        # This is a hard physical trade-off: the hold only reacts to a torque
+        # reading, one control tick
+        # (10ms) after the position that produced it. At full speed
+        # (gripper_max_delta_per_sec, 0.8 m/s = 8mm/tick) that one blind tick is
+        # what produced the measured 7 Nm spike against a 2 Nm cap -- and no
+        # amount of tuning the freeze/back-off logic can shrink a spike that
+        # already happened before the first reading came back. The only way to
+        # bound it is to not be moving as fast when contact happens.
         #
-        # A torque-triggered "slow down near the cap" band was tried first and does
-        # not work: at 8mm/tick the measured torque goes from zero to well past the
-        # cap in a single step, so the band is never entered. The rate has to be
-        # limited BEFORE contact, which means whenever a cap is armed.
+        # This value is fit to YOUR hardware's actual response, not a theoretical
+        # one: a simple KP*error model predicts ~3.8 Nm of overshoot at 0.8 m/s,
+        # but 7 Nm was measured -- a 1.84x gap, presumably from KD damping torque,
+        # actuator/CAN latency beyond one tick, or motor dynamics this model
+        # doesn't capture. Overshoot scales ~linearly with this speed, so halving/
+        # doubling it roughly halves/doubles the peak above the cap -- retest with
+        # Reset Peaks on the Motor Forces page and adjust:
+        #   ros2 param set /exoskeleton_bridge_node gripper_capped_close_speed_m_s 0.08
         #
-        # 0.15 m/s = 1.5mm/tick: full 44mm travel in ~0.3s, still brisk. Lower it
-        # for tighter force control, raise it for faster closing.
-        self.declare_parameter('gripper_capped_close_speed_m_s', 0.15)
+        # Only closing is affected; opening is always at full, unrestricted speed
+        # (see the `if desired_gripper < current` guard below), and this rate
+        # applies ONLY while a cap is configured at all -- with no cap set, the
+        # gripper behaves exactly as it did before any of this existed.
+        self.declare_parameter('gripper_capped_close_speed_m_s', 0.06)
         self.gripper_capped_close_speed_m_s = max(
-            0.005, float(self.get_parameter('gripper_capped_close_speed_m_s').value)
+            0.0, float(self.get_parameter('gripper_capped_close_speed_m_s').value)
         )
         self._start_gripper_torque_readers()
+
+        # Off-thread writer for the /tmp cap-state file (see the control_loop
+        # tail). control_loop is the 100Hz ROS timer callback that also publishes
+        # BOTH arms' commands, so anything synchronous in it -- even 3 fast
+        # syscalls plus JSON encoding -- steals from that tick's 10ms budget and
+        # delays when the NEXT tick fires, for both arms, not just the gripper.
+        # This showed up as periodic jerkiness synced to the file's 5Hz write
+        # rate. The control loop now only ever does a non-blocking queue put;
+        # this thread does the actual open/dump/replace.
+        self._cap_state_queue = queue.Queue(maxsize=1)
+        threading.Thread(
+            target=self._cap_state_writer_loop, name="cap_state_writer", daemon=True
+        ).start()
 
         # Current measured robot state
         self.current_arm = {'left': None, 'right': None}
@@ -246,49 +270,36 @@ class ExoskeletonBridgeNode(Node):
         self.transition_start_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
         self.transition_start_gripper = {'left': 0.0, 'right': 0.0}
         self.transition_duration = {'left': 8.0, 'right': 8.0}
-        # Set by set_home_target to make the control loop recompute a
-        # transition without faking a lock-state change (see ui_command_callback).
         self.force_transition = {'left': False, 'right': False}
-        # Latched while a homing ramp is in flight, so an unlock arriving
-        # mid-homing cannot divert the arm to the exoskeleton pose.
         self.homing_active = {'left': False, 'right': False}
         self.homing_target_arm = {'left': np.zeros(7, dtype=float), 'right': np.zeros(7, dtype=float)}
         self.homing_target_gripper = {'left': 0.0, 'right': 0.0}
-        # ABSOLUTE wall-clock deadline for the homing latch. Must not be
-        # derived from transition_start_time/transition_duration: an unlock
-        # arriving at episode start overwrites both, which reset the elapsed
-        # time to 0 and kept the latch alive for the whole *unlock* duration —
-        # pinning the arm at home exactly when it should be releasing.
         self.homing_until = {'left': 0.0, 'right': 0.0}
         from std_msgs.msg import String
-        import json
         from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-        # Subscriber uses RELIABLE + VOLATILE so it accepts publishers with ANY
-        # durability (both VOLATILE and TRANSIENT_LOCAL).  A TRANSIENT_LOCAL
-        # subscriber would reject VOLATILE publishers — breaking communication.
         _ui_cmd_qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
-        self.ui_command_sub = self.create_subscription(String, '/exo/ui_command', self.ui_command_callback, _ui_cmd_qos)
+        self.ui_command_sub = self.create_subscription(
+            String, '/exo/ui_command', self.ui_command_callback, _ui_cmd_qos
+        )
 
         self.last_control_time = None
-
         self.control_timer = self.create_timer(1.0 / self.control_rate_hz, self.control_loop)
 
-        self.get_logger().info(
-            'Exoskeleton Bridge Node 已启动\n'
-            f'  control_rate_hz: {self.control_rate_hz}\n'
-            f'  joint_smoothing_alpha: {self.joint_smoothing_alpha}, joint_max_delta_per_sec: {self.joint_max_delta_per_sec}\n'
-            f'  gripper_smoothing_alpha: {self.gripper_smoothing_alpha}, gripper_max_delta_per_sec: {self.gripper_max_delta_per_sec}\n'
-            f'  gripper_range_m: [{self.gripper_min_position_m}, {self.gripper_max_position_m}], gripper_close_extra_m: {self.gripper_close_extra_m}\n'
-            f'  homing_gripper_duration_sec: {self.homing_gripper_duration_sec}\n'
-            f'  enable_boot_homing: {self.enable_boot_homing}, boot_homing_duration_sec: {self.boot_homing_duration_sec}\n'
-            f'  left_joint_multipliers: {self.left_joint_multipliers}\n'
-            f'  right_joint_multipliers: {self.right_joint_multipliers}\n'
-            f'  left_gripper_reverse: {self.left_gripper_reverse}, right_gripper_reverse: {self.right_gripper_reverse}'
-        )
+    def _cap_state_writer_loop(self):
+        while True:
+            payload = self._cap_state_queue.get()   # blocks here, never in control_loop
+            try:
+                tmp = "/tmp/lelab_gripper_cap_state.json.tmp"
+                with open(tmp, "w") as fh:
+                    json.dump(payload, fh)
+                os.replace(tmp, "/tmp/lelab_gripper_cap_state.json")
+            except Exception:
+                pass   # diagnostics must never disturb anything that depends on this thread
+
 
     def ui_command_callback(self, msg):
         import json
@@ -490,7 +501,7 @@ class ExoskeletonBridgeNode(Node):
         start order, with or without lelab running. lelab still publishes changes
         for immediate effect.
         """
-        caps = {'left': 5.0, 'right': 5.0}   # matches lelab's DEFAULT_GRIPPER_TORQUE_CAP_NM
+        caps = {'left': 2.0, 'right': 2.0}   # matches lelab's DEFAULT_GRIPPER_TORQUE_CAP_NM
         path = Path.home() / ".config" / "lelab" / "motor_config.json"
         try:
             import json
@@ -561,13 +572,7 @@ class ExoskeletonBridgeNode(Node):
         return abs(float(fb.torque))
 
     def _apply_gripper_torque_cap(self, side, desired_gripper):
-        """Freeze closing once measured torque reaches the cap.
-
-        Returns the gripper command to actually publish. Opening is never
-        restricted -- only further CLOSING is refused, so the operator can always
-        let go. Below the release threshold the clamp lifts by itself, which is
-        what lets the gripper close again after the object is removed.
-        """
+        """Latch the closing setpoint when torque reaches the configured cap."""
         cap = self.gripper_torque_cap_nm.get(side)
         if cap is None:
             return desired_gripper
@@ -577,73 +582,46 @@ class ExoskeletonBridgeNode(Node):
             return desired_gripper
 
         held = self.gripper_limit_m.get(side)
+        current = float(self.cmd_gripper[side])
 
-        # OVER the cap: open back up until the force comes down.
-        #
-        # Freezing alone cannot fix an overshoot that has already happened, and it
-        # was measured happening constantly: at 8mm of setpoint travel per tick the
-        # command buries itself past the object in ONE tick, torque lands at ~7.5 Nm
-        # against a 5 Nm cap, and a pure freeze then holds that 7.5 Nm forever. To
-        # actually not exceed the cap the setpoint has to give ground.
-        #
-        # Deliberately a SLOW ramp with a dead band, not a jump to the measured
-        # aperture. Jumping there zeroes the force error outright, which collapses
-        # the force, trips the release threshold and re-closes -- the limit cycle
-        # reproduced earlier. Creeping open a fraction of a millimetre per tick and
-        # stopping inside the dead band settles at the cap instead.
-        if torque > cap * self.gripper_torque_backoff_ratio:
-            base = held if held is not None else float(self.cmd_gripper[side])
-            step = self.gripper_backoff_speed_m_s / max(1.0, self.control_rate_hz)
-            relieved = min(self.gripper_max_position_m, base + step)
-            self.gripper_limit_m[side] = relieved
-            if not getattr(self, '_backoff_logged', {}).get(side):
-                self._backoff_logged = getattr(self, '_backoff_logged', {})
-                self._backoff_logged[side] = True
-                self.get_logger().info(
-                    f"{side} gripper over cap ({torque:.2f} > {cap:.2f} Nm); "
-                    "easing open until the force drops"
-                )
-            return relieved
-
-        if torque >= cap:
-            # Freeze the COMMANDED setpoint, not the measured aperture.
-            #
-            # Closing force is KP x (commanded - measured), so freezing the
-            # command freezes the force: torque parks at the cap and stays there.
-            # Holding at the MEASURED aperture instead drives the setpoint back to
-            # where the fingers already are, which zeroes the error, collapses the
-            # force, trips the release threshold, and re-closes -- a limit cycle
-            # that buzzes the gripper (reproduced in simulation: the hold toggled
-            # every other tick).
-            #
-            # Freezing the command is only safe because this runs at control rate:
-            # the setpoint moves at most one rate-limited step (1.8mm at 0.18 m/s)
-            # past the trip point before it stops.
-            hold = float(self.cmd_gripper[side])
-            if held is None or hold > held:
-                self.gripper_limit_m[side] = hold
-                self.get_logger().info(
-                    f"{side} gripper reached {torque:.2f} Nm (cap {cap:.2f}); "
-                    f"holding at {hold:.4f} m"
-                )
-            held = self.gripper_limit_m[side]
-        elif held is not None and torque < cap * self.gripper_torque_release_ratio:
-            # Force has fallen well below the cap (object released, or the
-            # operator eased off): stop holding so full travel returns.
-            self.gripper_limit_m[side] = None
-            held = None
-
-        if held is not None and desired_gripper < held:
+        # An existing contact hold behaves like a virtual trigger position.
+        # Keep reporting that position while the real trigger asks to close
+        # farther.  An opening request always wins, even if the torque sample
+        # is still high for a tick or two after the command changes.
+        if held is not None:
+            if desired_gripper > held + self.gripper_limit_release_m:
+                self.gripper_limit_m[side] = None
+                return desired_gripper
             return held
 
-        # Cap armed: limit CLOSING speed so the force rise is sampleable and the
-        # freeze lands within about one tick of the cap. Opening is untouched --
-        # letting go must always be immediate.
-        current = float(self.cmd_gripper[side])
-        if desired_gripper < current:
-            step = self.gripper_capped_close_speed_m_s / max(1.0, self.control_rate_hz)
-            return max(desired_gripper, current - step)
-        return desired_gripper
+        # Never arm a force hold while opening.  The torque feedback necessarily
+        # lags the command, so it can still show contact force on the first few
+        # opening ticks.
+        if desired_gripper >= current:
+            return desired_gripper
+
+        # Enter the hold at cap - tolerance (1.75 Nm by default for a 2.00 Nm
+        # cap).  The hold is the last published setpoint: it stops further
+        # closing but does not command an opening/back-off motion.
+        trip_nm = max(0.0, cap - self.gripper_torque_tolerance_nm)
+        if torque >= trip_nm:
+            self.gripper_limit_m[side] = current
+            self.get_logger().info(
+                f"{side} gripper reached {torque:.2f} Nm "
+                f"(trip {trip_nm:.2f}, cap {cap:.2f}); "
+                f"holding at {current:.4f} m"
+            )
+            return current
+
+        # Closing, cap armed, not yet frozen: this is the approach into whatever
+        # is about to be gripped. Rate-limit it so the eventual first over-cap
+        # tick is a small step instead of a full-speed one -- seven guaranteed
+        # trip whenever this stays at 0.8 m/s. 0 or negative disables it (escape
+        # hatch back to the pre-this-feature behaviour).
+        if self.gripper_capped_close_speed_m_s <= 0.0:
+            return desired_gripper
+        step = self.gripper_capped_close_speed_m_s / max(1.0, self.control_rate_hz)
+        return max(desired_gripper, current - step)
 
     def _publish_arm(self, side, arm_values, gripper_value):
         """Publish the 7 arm joints AND the finger joint as one command array.
@@ -948,21 +926,27 @@ class ExoskeletonBridgeNode(Node):
             # falls back to a subprocess publisher), so a ROS topic can never reach
             # it. Same approach openarm_camera_bridge_node.py already uses for
             # /tmp/lelab_camera_status.json.
+            #
+            # Non-blocking hand-off ONLY -- the actual file I/O happens on
+            # _cap_state_writer_loop's thread, never here. maxsize=1 + put_nowait
+            # means a writer that's briefly behind just gets its stale sample
+            # overwritten by the next one rather than the control loop blocking
+            # on a full queue.
+            payload = {
+                "updated_at": time.time(),
+                "cap_nm": {s: self.gripper_torque_cap_nm[s] for s in ('left', 'right')},
+                "hold_m": {s: self.gripper_limit_m[s] for s in ('left', 'right')},
+                "torque_nm": {s: self._gripper_torque(s) for s in ('left', 'right')},
+                "close_speed_m_s": self.gripper_capped_close_speed_m_s,
+            }
             try:
-                import json
-                payload = {
-                    "updated_at": time.time(),
-                    "cap_nm": {s: self.gripper_torque_cap_nm[s] for s in ('left', 'right')},
-                    "hold_m": {s: self.gripper_limit_m[s] for s in ('left', 'right')},
-                    "torque_nm": {s: self._gripper_torque(s) for s in ('left', 'right')},
-                    "close_speed_m_s": self.gripper_capped_close_speed_m_s,
-                }
-                tmp = "/tmp/lelab_gripper_cap_state.json.tmp"
-                with open(tmp, "w") as fh:
-                    json.dump(payload, fh)
-                os.replace(tmp, "/tmp/lelab_gripper_cap_state.json")
-            except Exception:
-                pass   # diagnostics must never disturb the control loop
+                self._cap_state_queue.get_nowait()   # drop any stale unread sample
+            except queue.Empty:
+                pass
+            try:
+                self._cap_state_queue.put_nowait(payload)
+            except queue.Full:
+                pass
 
 
 def main(args=None):

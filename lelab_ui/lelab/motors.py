@@ -177,7 +177,7 @@ _gripper_limits_lock = threading.Lock()
 # Persisted so a cap survives a restart -- a force limit you have to re-enter
 # every session is a limit you will eventually forget to set.
 MOTOR_CONFIG_PATH = Path.home() / ".config" / "lelab" / "motor_config.json"
-DEFAULT_GRIPPER_TORQUE_CAP_NM = 5.0
+DEFAULT_GRIPPER_TORQUE_CAP_NM = 2.0
 
 
 def load_gripper_torque_caps() -> dict[str, float]:
