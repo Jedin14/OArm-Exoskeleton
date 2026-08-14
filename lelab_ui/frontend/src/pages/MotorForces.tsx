@@ -427,51 +427,59 @@ const MotorForces: React.FC<{ isModal?: boolean; onClose?: () => void }> = ({
                         {limit != null && ` · holding ${(limit * 1000).toFixed(1)} mm`}
                       </span>
                     )}
-                    {cap == null ? (
-                      <>
-                        {/* Prefilled with the live torque so "limit it here" is one
-                            click while you are actually squeezing the object. */}
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="number"
-                            step="0.05"
-                            min="0.05"
-                            max={gripper.t_max_nm ?? 10}
-                            value={
-                              draftCaps[side] ??
-                              (gripper.torque_nm != null ? Math.abs(gripper.torque_nm).toFixed(2) : "")
-                            }
-                            onChange={(e) =>
-                              setDraftCaps((prev) => ({ ...prev, [side]: e.target.value }))
-                            }
-                            className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white font-mono focus:outline-none focus:border-amber-500"
-                          />
-                          <span className="text-xs text-gray-500">Nm</span>
-                        </div>
-                        <Button
-                          onClick={() => {
-                            const raw =
-                              draftCaps[side] ??
-                              (gripper.torque_nm != null
-                                ? Math.abs(gripper.torque_nm).toFixed(2)
-                                : "");
-                            const value = parseFloat(raw);
-                            if (!Number.isFinite(value) || value <= 0) {
-                              toast({
-                                title: "Enter a torque above 0 Nm",
-                                variant: "destructive",
-                              });
-                              return;
-                            }
-                            setLimit(side, value);
-                          }}
-                          disabled={busySide === side || !!arm.error || gripper.stale}
-                          className="bg-amber-600 hover:bg-amber-500 text-white font-semibold"
-                        >
-                          <Lock className="w-4 h-4 mr-2" /> Limit Force
-                        </Button>
-                      </>
-                    ) : (
+                    {/* ALWAYS editable. This used to render only when no cap was
+                        active, which made it unreachable the moment the cap gained
+                        a 5 Nm default: the only thing on screen was "Capped at
+                        5.00 Nm" and Release. Changing the value is the normal
+                        operation, not an edge case.
+
+                        Prefilled with the ACTIVE cap when there is one, otherwise
+                        the live torque, so "limit it right here" stays one click
+                        while you are squeezing. */}
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        step="0.05"
+                        min="0.05"
+                        max={gripper.t_max_nm ?? 10}
+                        value={
+                          draftCaps[side] ??
+                          (cap != null
+                            ? cap.toFixed(2)
+                            : gripper.torque_nm != null
+                            ? Math.abs(gripper.torque_nm).toFixed(2)
+                            : "")
+                        }
+                        onChange={(e) =>
+                          setDraftCaps((prev) => ({ ...prev, [side]: e.target.value }))
+                        }
+                        className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white font-mono focus:outline-none focus:border-amber-500"
+                      />
+                      <span className="text-xs text-gray-500">Nm</span>
+                    </div>
+                    <Button
+                      onClick={() => {
+                        const raw =
+                          draftCaps[side] ??
+                          (cap != null
+                            ? cap.toFixed(2)
+                            : gripper.torque_nm != null
+                            ? Math.abs(gripper.torque_nm).toFixed(2)
+                            : "");
+                        const value = parseFloat(raw);
+                        if (!Number.isFinite(value) || value <= 0) {
+                          toast({ title: "Enter a torque above 0 Nm", variant: "destructive" });
+                          return;
+                        }
+                        setLimit(side, value);
+                      }}
+                      disabled={busySide === side || !!arm.error || gripper.stale}
+                      className="bg-amber-600 hover:bg-amber-500 text-white font-semibold"
+                    >
+                      <Lock className="w-4 h-4 mr-2" />
+                      {cap != null ? "Update Cap" : "Limit Force"}
+                    </Button>
+                    {cap != null && (
                       <Button
                         onClick={() => clearLimit(side)}
                         disabled={busySide === side}
