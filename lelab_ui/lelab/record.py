@@ -147,6 +147,46 @@ _ros_ui_cmd_node = None
 _ros_ui_cmd_pub = None
 _ros_ui_cmd_lock = threading.Lock()
 
+# Persistent out-of-process publisher (see _send_ui_command). One long-lived
+# process instead of one per command.
+_ui_daemon_proc = None
+_ui_daemon_lock = threading.Lock()
+
+
+def _daemon_send(cmd_str: str) -> bool:
+    """Hand one command to the persistent publisher, starting it if needed.
+
+    Returns False if the daemon could not be started or the write failed, so the
+    caller can fall back to a one-shot publish rather than dropping the command.
+    """
+    global _ui_daemon_proc
+    import os
+    import subprocess
+
+    with _ui_daemon_lock:
+        if _ui_daemon_proc is None or _ui_daemon_proc.poll() is not None:
+            script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
+            _ui_daemon_proc = subprocess.Popen(
+                ["/usr/bin/python3", "-u", script_path, "--daemon"],
+                stdin=subprocess.PIPE,
+                text=True,
+            )
+            logger.info("started ui_command publisher daemon (pid %s)", _ui_daemon_proc.pid)
+
+        try:
+            _ui_daemon_proc.stdin.write(cmd_str + "\n")
+            _ui_daemon_proc.stdin.flush()
+            return True
+        except Exception:
+            # Broken pipe: the daemon died. Drop the handle so the next call
+            # restarts it, and let this command go out one-shot.
+            try:
+                _ui_daemon_proc.kill()
+            except Exception:
+                pass
+            _ui_daemon_proc = None
+            return False
+
 def _send_ui_command(cmd_dict: dict) -> bool:
     """Publish a UI command to /exo/ui_command instantly via in-process ROS publisher.
     Falls back to subprocess if ROS is not available in this process."""
@@ -183,14 +223,37 @@ def _send_ui_command(cmd_dict: dict) -> bool:
         return True
     except Exception as e:
         logger.warning(f"_send_ui_command ROS failed ({e}), falling back to subprocess")
-        # Subprocess fallback — always works but has 2-3s startup cost
+        # Out-of-process fallback, via a PERSISTENT publisher.
+        #
+        # This path is the normal one, not an exception: lelab runs in a venv
+        # without rclpy, so the in-process publish above always raises.
+        #
+        # It used to spawn publish_ui_command.py per command -- a python+rclpy
+        # startup plus up to 1.5s of DDS discovery, ~2-4s of CPU each. An episode
+        # fires ~8 of those in its first two seconds (unlock re-asserted for both
+        # arms, 4 rounds) and up to 10 more during homing. Overlapping with the
+        # 30fps capture loop, that caused the arm to stutter at episode
+        # boundaries, and -- worse -- under its own CPU load discovery often did
+        # not finish in time, so "end episode" homing commands were published
+        # with no subscriber and silently lost. Both were intermittent because
+        # both depended on scheduling luck.
+        #
+        # The daemon pays that cost once and then takes a line per command.
         try:
-            import subprocess, os
+            if _daemon_send(cmd_str):
+                logger.info(f"_send_ui_command (daemon): {cmd_str}")
+                return True
+        except Exception as e2:
+            logger.warning(f"_send_ui_command daemon failed ({e2}); using one-shot")
+
+        try:
+            import os
+            import subprocess
             script_path = os.path.join(os.path.dirname(__file__), "publish_ui_command.py")
             subprocess.Popen(["/usr/bin/python3", script_path, cmd_str])
             return True
-        except Exception as e2:
-            logger.error(f"_send_ui_command subprocess fallback also failed: {e2}")
+        except Exception as e3:
+            logger.error(f"_send_ui_command one-shot fallback also failed: {e3}")
             return False
 
 

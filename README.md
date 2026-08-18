@@ -117,4 +117,6 @@ You can adjust the following parameters inside the `teleop_sim_full.launch.py` o
 
 
 python3 lelab_ui/lelab/scripts/visualize_sync.py \
-/home/jed/.cache/huggingface/lerobot/JedEYE14/packet_v2.1_20260727_145038
+/home/jed/.cache/huggingface/lerobot/JedEYE14/xyz
+
+lelab_ui/venv/bin/python3.12 check_dataset_health.py JedEYE14/xyz --cap-nm 2.0
