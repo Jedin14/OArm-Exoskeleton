@@ -64,7 +64,6 @@ interface RecordingModalProps {
   homePositionId: string;
   setHomePositionId: (value: string) => void;
   includeEePose: boolean;
-  setIncludeEePose: (value: boolean) => void;
 }
 
 const RecordingModal: React.FC<RecordingModalProps> = ({
@@ -99,7 +98,6 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
   homePositionId,
   setHomePositionId,
   includeEePose,
-  setIncludeEePose,
 }) => {
   const { auth } = useHfAuth();
   const { baseUrl, fetchWithHeaders } = useApi();
@@ -524,36 +522,15 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
                   </div>
                 </div>
                 {isRosMode && (
-                  <div className="flex items-start gap-3">
-                    <Checkbox
-                      id="includeEePose"
-                      checked={includeEePose}
-                      disabled={isResume}
-                      onCheckedChange={(value) =>
-                        setIncludeEePose(value === true)
-                      }
-                      className="mt-0.5 border-gray-500 data-[state=checked]:bg-red-500 data-[state=checked]:border-red-500 disabled:opacity-60"
-                    />
-                    <div className="space-y-1">
-                      <Label
-                        htmlFor="includeEePose"
-                        className="text-sm font-medium text-gray-200 cursor-pointer"
-                      >
-                        Include end-effector pose in observations
-                      </Label>
-                      <p className="text-xs text-gray-500">
-                        Adds derived end-effector pose and gripper width as
-                        extra observation dims (7 + 1 per arm). Uncheck to
-                        record only the raw joint positions — 8 observations
-                        matching the 8 actions per arm, nothing derived.
-                      </p>
-                      {isResume && (
-                        <p className="text-xs text-gray-500">
-                          Locked to match the existing dataset.
-                        </p>
-                      )}
-                    </div>
-                  </div>
+                  <p className="text-xs text-gray-500">
+                    End-effector pose in observations:{" "}
+                    <span className="text-gray-300">
+                      {includeEePose ? "included" : "not included"}
+                    </span>
+                    {isResume
+                      ? " — locked to match the existing dataset."
+                      : " — change it in I/O Configuration."}
+                  </p>
                 )}
               </CollapsibleContent>
             </Collapsible>

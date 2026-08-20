@@ -51,7 +51,10 @@ const Landing = () => {
   const [streamingEncoding, setStreamingEncoding] = useState(false);
   const [datasetVersion, setDatasetVersion] = useState("v3.0");
   const [armMode, setArmMode] = useState("both");
-  const [includeEePose, setIncludeEePose] = useState(true);
+  // Off unless the I/O Configuration page says otherwise (or a resumed dataset
+  // was created with it). Sourced from io_config.json so the choice is made once
+  // in settings rather than per recording.
+  const [includeEePose, setIncludeEePose] = useState(false);
   const [homePositionId, setHomePositionIdState] = useState<string>(
     () => localStorage.getItem("lelab_home_position_id") ?? ""
   );
@@ -73,6 +76,25 @@ const Landing = () => {
 
   const [isResume, setIsResume] = useState(false);
   const [resumeCameraNames, setResumeCameraNames] = useState<string[]>([]);
+  // A resumed dataset's own include_ee_pose wins over the saved default, and it
+  // is fetched asynchronously too — so the resume path claims this flag before
+  // the io-config fetch can land, rather than the two racing.
+  const eePoseFromDatasetRef = useRef(false);
+
+  // Saved recording default from the I/O Configuration page.
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetchWithHeaders(`${baseUrl}/io-config`);
+        const data = await r.json();
+        if (typeof data.include_ee_pose === "boolean" && !eePoseFromDatasetRef.current) {
+          setIncludeEePose(data.include_ee_pose);
+        }
+      } catch {
+        // Keep the off-by-default value.
+      }
+    })();
+  }, [baseUrl, fetchWithHeaders]);
 
   useEffect(() => {
     const resumeRepoId = location.state?.resumeRepoId;
@@ -101,6 +123,7 @@ const Landing = () => {
               setDatasetVersion(data.codebase_version);
             }
             if (typeof data.include_ee_pose === "boolean") {
+              eePoseFromDatasetRef.current = true;
               setIncludeEePose(data.include_ee_pose);
             }
             const existingTasks = Array.isArray(data.tasks)
@@ -168,6 +191,20 @@ const Landing = () => {
     if (!open) {
       setIsResume(false);
       setResumeCameraNames([]);
+      if (eePoseFromDatasetRef.current) {
+        // Leaving a resume: stop honouring that dataset's flag and go back to
+        // the saved default, so the next fresh recording is not silently
+        // inheriting it.
+        eePoseFromDatasetRef.current = false;
+        fetchWithHeaders(`${baseUrl}/io-config`)
+          .then((r) => r.json())
+          .then((data) => {
+            if (typeof data.include_ee_pose === "boolean") {
+              setIncludeEePose(data.include_ee_pose);
+            }
+          })
+          .catch(() => undefined);
+      }
       if (releaseStreamsRef.current) {
         console.log("🧹 Modal closed: Releasing camera streams");
         releaseStreamsRef.current();
@@ -482,7 +519,6 @@ const Landing = () => {
         homePositionId={homePositionId}
         setHomePositionId={setHomePositionId}
         includeEePose={includeEePose}
-        setIncludeEePose={setIncludeEePose}
       />
     </div>
   );

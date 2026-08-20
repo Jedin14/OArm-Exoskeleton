@@ -284,7 +284,10 @@ class RecordingRequest(BaseModel):
     arm_mode: str = "both"  # "left", "right", or "both"
     home_position_id: str | None = None  # ID of the chosen arm position for homing
     robot_name: str | None = None  # Name of the robot to lookup position
-    include_ee_pose: bool = True  # Add derived ee_pose/gripper_state observation dims (openarm_ros only)
+    # Add derived ee_pose/gripper_state observation dims (openarm_ros only). Off
+    # unless asked for: the persisted default lives in io_config.json and the UI
+    # sends it explicitly, so an omitted field means "raw joints only".
+    include_ee_pose: bool = False
 
 
 class UploadRequest(BaseModel):

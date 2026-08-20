@@ -821,7 +821,11 @@ IO_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "lelab", "io_c
 # state, then both write, and the later replace would silently discard the other
 # one's change.
 _io_config_lock = threading.Lock()
-IO_CONFIG_DEFAULTS = {"ros_camera": False}
+# include_ee_pose is a recording default, not a launch setting: it lives here so
+# the choice persists across sessions instead of being re-made in the recording
+# modal every time. Off by default — derived EE pose/gripper-width dims are extra
+# observations the raw joint stream does not need.
+IO_CONFIG_DEFAULTS = {"ros_camera": False, "include_ee_pose": False}
 
 
 def _read_io_config() -> dict:
@@ -879,7 +883,10 @@ def _camera_bridge_pids() -> list[int]:
 
 
 class IOConfigRequest(BaseModel):
-    ros_camera: bool
+    # Both optional so the page can PATCH one toggle without having to echo back
+    # the other one's current value (and race whoever changed it meanwhile).
+    ros_camera: bool | None = None
+    include_ee_pose: bool | None = None
 
 
 class GripperLimitRequest(BaseModel):
@@ -1243,7 +1250,12 @@ def set_io_config(req: IOConfigRequest):
     it never sees at run time. V4L2 devices are exclusive too, so the bridge and
     the direct reader cannot both hold a camera.
     """
-    cfg = _write_io_config(ros_camera=bool(req.ros_camera))
+    changes = {}
+    if req.ros_camera is not None:
+        changes["ros_camera"] = bool(req.ros_camera)
+    if req.include_ee_pose is not None:
+        changes["include_ee_pose"] = bool(req.include_ee_pose)
+    cfg = _write_io_config(**changes) if changes else _read_io_config()
     running = bool(_camera_bridge_pids())
     return {
         "status": "success",

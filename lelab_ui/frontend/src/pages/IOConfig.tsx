@@ -2,11 +2,12 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, AlertTriangle, Camera, Check } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Camera, Check, Move3d } from "lucide-react";
 import { useApi } from "@/contexts/ApiContext";
 
 interface IOConfig {
   ros_camera: boolean;
+  include_ee_pose: boolean;
   ros_camera_running?: boolean;
   requires_restart?: boolean;
 }
@@ -45,20 +46,16 @@ const IOConfigPage = () => {
     return () => clearInterval(t);
   }, []);
 
-  const save = async (next: boolean) => {
+  const save = async (changes: Partial<IOConfig>, toastArgs: { title: string; description: string }) => {
     setSaving(true);
     try {
       const r = await fetchWithHeaders(`${baseUrl}/io-config`, {
         method: "POST",
-        body: JSON.stringify({ ros_camera: next }),
+        body: JSON.stringify(changes),
       });
       const data = await r.json();
       setCfg(data);
-      setDirty(true);
-      toast({
-        title: next ? "ROS camera bridge enabled" : "ROS camera bridge disabled",
-        description: "Saved. Restart teleop for this to take effect.",
-      });
+      toast(toastArgs);
     } catch (e) {
       toast({ title: "Save failed", variant: "destructive" });
     } finally {
@@ -66,7 +63,32 @@ const IOConfigPage = () => {
     }
   };
 
+  // Only the bridge toggle needs a restart, so only it arms the restart/OK
+  // banner below.
+  const saveRosCamera = (next: boolean) => {
+    setDirty(true);
+    return save(
+      { ros_camera: next },
+      {
+        title: next ? "ROS camera bridge enabled" : "ROS camera bridge disabled",
+        description: "Saved. Restart teleop for this to take effect.",
+      },
+    );
+  };
+
+  const saveIncludeEePose = (next: boolean) =>
+    save(
+      { include_ee_pose: next },
+      {
+        title: next
+          ? "End-effector pose will be recorded"
+          : "End-effector pose will not be recorded",
+        description: "Applies to new datasets. Resumed datasets keep their own setting.",
+      },
+    );
+
   const rosCamera = cfg?.ros_camera ?? false;
+  const includeEePose = cfg?.include_ee_pose ?? false;
   const running = cfg?.ros_camera_running ?? false;
   const needsRestart = cfg?.requires_restart ?? false;
 
@@ -133,7 +155,7 @@ const IOConfigPage = () => {
             </div>
 
             <Button
-              onClick={() => save(!rosCamera)}
+              onClick={() => saveRosCamera(!rosCamera)}
               disabled={saving || cfg === null}
               variant={rosCamera ? "default" : "secondary"}
               className={`w-28 shrink-0 ${
@@ -143,6 +165,40 @@ const IOConfigPage = () => {
               }`}
             >
               {rosCamera ? "Enabled" : "Disabled"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-4 p-5 rounded-xl bg-gray-800/60 border border-gray-700">
+          <div className="flex items-start justify-between gap-6">
+            <div className="flex gap-3">
+              <Move3d className="w-5 h-5 text-gray-400 shrink-0 mt-1" />
+              <div>
+                <div className="font-semibold">End-effector pose in observations</div>
+                <div className="text-sm text-gray-400 mt-1 max-w-xl">
+                  Adds derived end-effector pose and gripper width as extra
+                  observation dims (7 + 1 per arm). Off by default so a dataset
+                  records only the raw joint positions — 8 observations matching
+                  the 8 actions per arm, nothing derived.
+                </div>
+                <div className="text-xs text-gray-500 mt-2">
+                  Applies to new datasets. Resuming an existing dataset keeps
+                  whatever it was created with, regardless of this setting.
+                </div>
+              </div>
+            </div>
+
+            <Button
+              onClick={() => saveIncludeEePose(!includeEePose)}
+              disabled={saving || cfg === null}
+              variant={includeEePose ? "default" : "secondary"}
+              className={`w-28 shrink-0 ${
+                includeEePose
+                  ? "bg-blue-600 hover:bg-blue-500 text-white"
+                  : "bg-gray-700 hover:bg-gray-600 text-gray-300"
+              }`}
+            >
+              {includeEePose ? "Enabled" : "Disabled"}
             </Button>
           </div>
         </div>
