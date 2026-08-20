@@ -22,16 +22,16 @@ setup(
             'launch/websocket_teleoperator.launch.py',
             'launch/exoskeleton_display.launch.py',
             'launch/exo_retargeting.launch.py',
-            'launch/openarm_teleoperator.launch.py',
-            'launch/openarm_display.launch.py',
-            'launch/openarm_hardware_control.launch.py',
+            'launch/oarm7dof_teleoperator.launch.py',
+            'launch/oarm7dof_display.launch.py',
+            'launch/oarm7dof_hardware_control.launch.py',
             'launch/exoskeleton_bridge.launch.py'
         ]),
         # Configuration files
         ('share/' + package_name + '/config', [
             'config/qnbot_teleoperator_config.yaml',
             'config/exoskeleton_display.rviz',
-            'config/retargeting_OpenArm.yaml'
+            'config/retargeting_oarm7dof.yaml'
         ]),
         # Kinematics chain files
         ('share/' + package_name + '/config/target', glob('config/target/*.yaml')),
@@ -62,9 +62,9 @@ setup(
             'websocket_teleoperator = qnbot_teleoperator.websocket_teleoperator:main',
             'exo_protocol_parser = qnbot_teleoperator.exo_protocol_parser:main',
             'exo_retargeting_node = qnbot_teleoperator.exo_retargeting_node:main',
-            'openarm_exo_tf_bridge_node = qnbot_teleoperator.openarm_exo_tf_bridge_node:main',
-            'openarm_arm_joint_merger = qnbot_teleoperator.openarm_arm_joint_merger:main',
-            'openarm_hardware_control_node = qnbot_teleoperator.openarm_hardware_control_node:main',
+            'oarm7dof_exo_tf_bridge_node = qnbot_teleoperator.oarm7dof_exo_tf_bridge_node:main',
+            'oarm7dof_arm_joint_merger = qnbot_teleoperator.oarm7dof_arm_joint_merger:main',
+            'oarm7dof_hardware_control_node = qnbot_teleoperator.oarm7dof_hardware_control_node:main',
             'exoskeleton_bridge_node = qnbot_teleoperator.exoskeleton_bridge_node:main',
         ],
     },

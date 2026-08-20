@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-openarm_camera_bridge_node.py
+oarm7dof_camera_bridge_node.py
 
 Publishes each USB camera listed in ~/.config/lelab/ros_camera_mappings.json
 as a sensor_msgs/CompressedImage ROS 2 topic, stamped with the ROS clock so
@@ -45,7 +45,7 @@ def load_mappings():
 
 class CameraPublisherNode(Node):
     def __init__(self):
-        super().__init__("openarm_camera_bridge")
+        super().__init__("oarm7dof_camera_bridge")
         self._threads = []
         self._stop_event = threading.Event()
         self._fps_counters = {}  # name -> deque of timestamps
@@ -94,7 +94,7 @@ class CameraPublisherNode(Node):
             t.start()
 
         self.get_logger().info(
-            f"OpenArm Camera Bridge started with {len(self._threads)} camera(s)."
+            f"7DOF-OArm Camera Bridge started with {len(self._threads)} camera(s)."
         )
 
     def _capture_loop(self, name, index, width, height, target_fps, pub):

@@ -99,7 +99,7 @@ const RobotTile: React.FC<RobotTileProps> = ({
         )}
       </div>
 
-      {robot && !robot.follower_port?.includes("openarm_ros") && !robot.follower_port?.includes("ROS2 (humble)") && (
+      {robot && !robot.follower_port?.includes("oarm7dof_ros") && !robot.follower_port?.includes("openarm_ros") && !robot.follower_port?.includes("ROS2 (humble)") && (
         <Tooltip>
           <TooltipTrigger asChild>
             <div className="w-full">

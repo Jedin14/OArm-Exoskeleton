@@ -2,7 +2,7 @@
 
 WHY THIS IS NOT `pgrep -f`
 --------------------------
-`pgrep -f openarm_camera_bridge_node.py` matches any process whose FULL command
+`pgrep -f oarm7dof_camera_bridge_node.py` matches any process whose FULL command
 line contains that string -- which includes every other `pgrep`/`pkill`
 invocation carrying the same pattern as an argument. pgrep excludes only itself,
 not its siblings.
@@ -36,7 +36,7 @@ import time
 
 logger = logging.getLogger(__name__)
 
-BRIDGE_SCRIPT_NAME = "openarm_camera_bridge_node.py"
+BRIDGE_SCRIPT_NAME = "oarm7dof_camera_bridge_node.py"
 
 
 def _cmdline(pid: str) -> list[str]:
@@ -55,7 +55,7 @@ def camera_bridge_pids(script_name: str = BRIDGE_SCRIPT_NAME) -> list[int]:
 
     Requires BOTH that the script name appears in the command line AND that the
     program being run is a Python interpreter. The bridge is always launched as
-    ``<python> .../openarm_camera_bridge_node.py``, whereas a false match (a
+    ``<python> .../oarm7dof_camera_bridge_node.py``, whereas a false match (a
     pgrep/pkill/shell command that merely mentions the name) never has python as
     argv[0]. Our own PID is excluded so a caller can never detect itself.
     """

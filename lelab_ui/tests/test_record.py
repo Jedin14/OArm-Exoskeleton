@@ -50,9 +50,9 @@ def test_handle_stop_recording_when_idle_returns_dict(tmp_lerobot_home) -> None:
 
 
 def _timestamp_test_robot(action_history: list[tuple[float, dict, dict]], target: float):
-    from lelab.robots.openarm_ros import OpenArmRosRobot
+    from lelab.robots.oarm7dof_ros import OArm7DOFRosRobot
 
-    robot = OpenArmRosRobot.__new__(OpenArmRosRobot)
+    robot = OArm7DOFRosRobot.__new__(OArm7DOFRosRobot)
     robot._data_lock = threading.Lock()
     robot._action_history = deque(action_history, maxlen=2000)
     robot._latest_action = {"joint.pos": 99.0}

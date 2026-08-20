@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-OpenArm硬件控制节点
-订阅关节命令话题，调用openarm_single_control.py提供的控制接口
+7DOF-OArm硬件控制节点
+订阅关节命令话题，调用oarm7dof_single_control.py提供的控制接口
 """
 
 import rclpy
@@ -12,15 +12,15 @@ import sys
 import signal
 import os
 
-# 导入openarm控制器（所有功能都在openarm_single_control.py中实现）
-from qnbot_teleoperator.openarm.openarm_single_control import OpenArmBimanualController
+# 导入openarm控制器（所有功能都在oarm7dof_single_control.py中实现）
+from qnbot_teleoperator.openarm.oarm7dof_single_control import OArm7DOFBimanualController
 
 
-class OpenArmHardwareControlNode(Node):
-    """OpenArm硬件控制节点 - 轻量级ROS2封装"""
+class OArm7DOFHardwareControlNode(Node):
+    """7DOF-OArm硬件控制节点 - 轻量级ROS2封装"""
     
     def __init__(self):
-        super().__init__('openarm_hardware_control_node')
+        super().__init__('oarm7dof_hardware_control_node')
         
         # 声明ROS2参数
         self.declare_parameter('usb_serial_number', '1F1AD573CBBDF4AC08D448446A81E925')
@@ -68,14 +68,14 @@ class OpenArmHardwareControlNode(Node):
             10
         )
         
-        # OpenArm控制器（使用openarm_single_control.py的统一接口）
+        # 7DOF-OArm控制器（使用oarm7dof_single_control.py的统一接口）
         self.controller = None
         self.control_timer = None
         self.init_timer = None
         self.consecutive_errors = 0  # 连续错误计数
         self.max_consecutive_errors = 5  # 最大连续错误次数
         
-        self.get_logger().info('OpenArm硬件控制节点初始化完成')
+        self.get_logger().info('7DOF-OArm硬件控制节点初始化完成')
         self.get_logger().info(f'USB序列号: {self.usb_sn}')
         self.get_logger().info(f'控制频率: {self.control_freq} Hz')
         self.get_logger().info(f'重力补偿: {"启用" if enable_gravity else "禁用"}')
@@ -113,8 +113,8 @@ class OpenArmHardwareControlNode(Node):
                     if gripper_idx < len(msg.position):
                         gripper_position = msg.position[gripper_idx]
                 
-                # 将归一化的夹爪位置(0.0-1.0)转换为OpenArm手指位置(0.0-0.044m)
-                # OpenArm的两个手指是镜像控制的，所以使用相同的位置
+                # 将归一化的夹爪位置(0.0-1.0)转换为7DOF-OArm手指位置(0.0-0.044m)
+                # 7DOF-OArm的两个手指是镜像控制的，所以使用相同的位置
                 finger_position = gripper_position * 0.67
                 self.left_arm_positions[7] = finger_position  # finger1
                 self.left_arm_positions[8] = finger_position  # finger2
@@ -153,8 +153,8 @@ class OpenArmHardwareControlNode(Node):
                     if gripper_idx < len(msg.position):
                         gripper_position = msg.position[gripper_idx]
                 
-                # 将归一化的夹爪位置(0.0-1.0)转换为OpenArm手指位置(0.0-0.044m)
-                # OpenArm的两个手指是镜像控制的，所以使用相同的位置
+                # 将归一化的夹爪位置(0.0-1.0)转换为7DOF-OArm手指位置(0.0-0.044m)
+                # 7DOF-OArm的两个手指是镜像控制的，所以使用相同的位置
                 finger_position = gripper_position * 0.67
                 self.right_arm_positions[7] = finger_position  # finger1
                 self.right_arm_positions[8] = finger_position  # finger2
@@ -171,7 +171,7 @@ class OpenArmHardwareControlNode(Node):
             self.get_logger().error(f'处理右臂关节命令时出错: {e}')
     
     def initialize_controller(self):
-        """初始化OpenArm控制器"""
+        """初始化7DOF-OArm控制器"""
         if self.controller is not None:
             # 已初始化，停止定时器
             if self.init_timer is not None:
@@ -184,17 +184,17 @@ class OpenArmHardwareControlNode(Node):
             return
         
         try:
-            self.get_logger().info('开始初始化OpenArm控制器...')
+            self.get_logger().info('开始初始化7DOF-OArm控制器...')
             
-            # 使用openarm_single_control.py的OpenArmBimanualController类
-            self.controller = OpenArmBimanualController(
+            # 使用oarm7dof_single_control.py的OArm7DOFBimanualController类
+            self.controller = OArm7DOFBimanualController(
                 usb_serial_number=self.init_params['usb_serial_number'],
                 urdf_path=self.init_params['urdf_path'],
                 enable_gravity_compensation=self.init_params['enable_gravity_compensation'],
                 gravity_compensation_factor=self.init_params['gravity_compensation_factor']
             )
             
-            self.get_logger().info('✅ OpenArm控制器初始化成功！')
+            self.get_logger().info('✅ 7DOF-OArm控制器初始化成功！')
             
             # 启动控制定时器
             control_period = 1.0 / self.control_freq
@@ -208,12 +208,12 @@ class OpenArmHardwareControlNode(Node):
                 self.init_timer = None
             
         except Exception as e:
-            self.get_logger().error(f'初始化OpenArm控制器失败: {e}')
+            self.get_logger().error(f'初始化7DOF-OArm控制器失败: {e}')
             import traceback
             self.get_logger().error(traceback.format_exc())
     
     def control_loop(self):
-        """控制循环 - 调用openarm_single_control.py的位置控制接口"""
+        """控制循环 - 调用oarm7dof_single_control.py的位置控制接口"""
         try:
             # 检查左右臂命令超时
             time_since_left = (self.get_clock().now() - self.last_left_arm_time).nanoseconds / 1e9
@@ -223,7 +223,7 @@ class OpenArmHardwareControlNode(Node):
                 self.get_logger().warn('关节命令数据超时', throttle_duration_sec=2.0)
                 return
             
-            # 调用openarm_single_control.py的位置控制接口
+            # 调用oarm7dof_single_control.py的位置控制接口
             # 所有底层逻辑（重力补偿计算、电机控制）都在那里完成
             self.controller.control_position(
                 left_arm_positions=self.left_arm_positions,
@@ -261,7 +261,7 @@ class OpenArmHardwareControlNode(Node):
     
     def shutdown(self):
         """关闭节点"""
-        self.get_logger().info('正在关闭OpenArm硬件控制节点...')
+        self.get_logger().info('正在关闭7DOF-OArm硬件控制节点...')
         
         # 停止控制定时器
         if self.control_timer:
@@ -276,18 +276,18 @@ class OpenArmHardwareControlNode(Node):
         if self.controller:
             try:
                 self.controller.close()
-                self.get_logger().info('OpenArm控制器已关闭')
+                self.get_logger().info('7DOF-OArm控制器已关闭')
             except Exception as e:
                 self.get_logger().error(f'关闭控制器失败: {e}')
         
-        self.get_logger().info('OpenArm硬件控制节点已安全关闭')
+        self.get_logger().info('7DOF-OArm硬件控制节点已安全关闭')
 
 
 def main(args=None):
     """主函数"""
     rclpy.init(args=args)
     
-    node = OpenArmHardwareControlNode()
+    node = OArm7DOFHardwareControlNode()
     
     def signal_handler(sig, frame):
         """信号处理器"""

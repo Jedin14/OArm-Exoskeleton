@@ -443,7 +443,7 @@ def is_robot_record_clean(record: dict) -> bool:
         return False
         
     follower_port = record.get("follower_port", "")
-    if isinstance(follower_port, str) and (follower_port.startswith("openarm_ros") or follower_port.startswith("ROS2 (humble)")):
+    if isinstance(follower_port, str) and (follower_port.startswith("oarm7dof_ros") or follower_port.startswith("ROS2 (humble)")):
         return True
         
     for field in _ROBOT_STRING_FIELDS:

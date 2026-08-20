@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-OpenArm外骨骼TF桥接节点 (OpenArm Exoskeleton TF Bridge Node)
-将外骨骼的手臂TF重新映射到OpenArm机器人的肩膀位置
+7DOF-OArm外骨骼TF桥接节点 (7DOF-OArm Exoskeleton TF Bridge Node)
+将外骨骼的手臂TF重新映射到7DOF-OArm机器人的肩膀位置
 
 功能：
 1. 监听外骨骼的TF数据（exoskeleton/left_base_link, exoskeleton/right_base_link）
-2. 将外骨骼手臂的TF重新发布到OpenArm机器人的肩膀位置
-3. 创建完整的TF树，将外骨骼手臂与OpenArm身体结合
+2. 将外骨骼手臂的TF重新发布到7DOF-OArm机器人的肩膀位置
+3. 创建完整的TF树，将外骨骼手臂与7DOF-OArm身体结合
 
 TF映射关系：
-- 外骨骼 exoskeleton/left_base_link  -> OpenArm openarm_body_link0 + 左肩偏移
-- 外骨骼 exoskeleton/right_base_link -> OpenArm openarm_body_link0 + 右肩偏移
+- 外骨骼 exoskeleton/left_base_link  -> 7DOF-OArm openarm_body_link0 + 左肩偏移
+- 外骨骼 exoskeleton/right_base_link -> 7DOF-OArm openarm_body_link0 + 右肩偏移
 
 重要设计说明：
 - 外骨骼绑定到固定的躯干框架(openarm_body_link0)
@@ -29,18 +29,18 @@ from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 import tf_transformations
 
-class OpenArmExoTfBridgeNode(Node):
+class OArm7DOFExoTfBridgeNode(Node):
     """
-    OpenArm外骨骼TF桥接节点
+    7DOF-OArm外骨骼TF桥接节点
     
     功能：
     - 监听外骨骼的TF（在exoskeleton名空间中）
-    - 将外骨骼手臂TF重新映射到OpenArm机器人的肩膀位置
+    - 将外骨骼手臂TF重新映射到7DOF-OArm机器人的肩膀位置
     - 发布完整的TF树
     """
     
     def __init__(self):
-        super().__init__('openarm_exo_tf_bridge_node')
+        super().__init__('oarm7dof_exo_tf_bridge_node')
         
         # 参数声明
         self.declare_parameter('exo_namespace', 'exoskeleton')
@@ -84,7 +84,7 @@ class OpenArmExoTfBridgeNode(Node):
         self.pose_output_counter = 0
         
         self.get_logger().info(
-            f'OpenArm外骨骼TF桥接节点已启动'
+            f'7DOF-OArm外骨骼TF桥接节点已启动'
             f'\n  外骨骼名空间: {self.exo_namespace}'
             f'\n  机器人基座框架: {self.robot_base_frame}'
             f'\n  发布频率: {self.publish_rate} Hz'
@@ -96,7 +96,7 @@ class OpenArmExoTfBridgeNode(Node):
         )
     
     def publish_dynamic_transforms(self):
-        """发布动态TF变换，将外骨骼手臂映射到OpenArm肩膀"""
+        """发布动态TF变换，将外骨骼手臂映射到7DOF-OArm肩膀"""
         try:
             current_time = self.get_clock().now()
             
@@ -138,7 +138,7 @@ class OpenArmExoTfBridgeNode(Node):
             # 外骨骼手臂框架名称（在命名空间中）
             exo_arm_frame = f'{self.exo_namespace}/{arm_side}_base_link'
             
-            # OpenArm肩膀固定安装点
+            # 7DOF-OArm肩膀固定安装点
             # 基于v10.urdf.xacro中的配置：
             # left_arm_base_xyz="0.0 0.031 0.698"
             # left_arm_base_rpy="-1.5708 0 0"
@@ -157,11 +157,11 @@ class OpenArmExoTfBridgeNode(Node):
                 # 右臂RPY: 90度绕X轴
                 base_rpy = (0.0, 0.0, 0.0)
             
-            # 创建新的变换：将外骨骼手臂base_link映射到OpenArm肩膀
+            # 创建新的变换：将外骨骼手臂base_link映射到7DOF-OArm肩膀
             try:
                 arm_transform = TransformStamped()
                 arm_transform.header.stamp = current_time.to_msg()
-                arm_transform.header.frame_id = shoulder_frame  # OpenArm躯干
+                arm_transform.header.frame_id = shoulder_frame  # 7DOF-OArm躯干
                 arm_transform.child_frame_id = f'exo_{arm_side}_base_link'  # 外骨骼手臂base_link（不带命名空间前缀）
                 
                 # 设置偏移变换
@@ -169,8 +169,8 @@ class OpenArmExoTfBridgeNode(Node):
                 arm_transform.transform.translation.y = shoulder_offset[1] 
                 arm_transform.transform.translation.z = shoulder_offset[2]
                 
-                # 设置旋转 - 对齐外骨骼Z轴与OpenArm手臂坐标系
-                # 外骨骼Z轴向上，需要旋转使其对齐OpenArm的关节轴
+                # 设置旋转 - 对齐外骨骼Z轴与7DOF-OArm手臂坐标系
+                # 外骨骼Z轴向上，需要旋转使其对齐7DOF-OArm的关节轴
                 if arm_side == 'left':
                     # 左臂：组合基础旋转和外骨骼对齐
                     # 先应用base_rpy，然后调整外骨骼方向
@@ -377,7 +377,7 @@ class OpenArmExoTfBridgeNode(Node):
     
     def destroy_node(self):
         """清理节点资源"""
-        self.get_logger().info('正在关闭OpenArm外骨骼TF桥接节点...')
+        self.get_logger().info('正在关闭7DOF-OArm外骨骼TF桥接节点...')
         super().destroy_node()
 
 
@@ -387,7 +387,7 @@ def main(args=None):
     
     try:
         # 创建节点
-        node = OpenArmExoTfBridgeNode()
+        node = OArm7DOFExoTfBridgeNode()
         
         # 使用多线程执行器
         executor = MultiThreadedExecutor()
@@ -404,7 +404,7 @@ def main(args=None):
             executor.shutdown()
             
     except Exception as e:
-        print(f'OpenArm TF桥接节点启动失败: {e}')
+        print(f'7DOF-OArm TF桥接节点启动失败: {e}')
     finally:
         try:
             rclpy.shutdown()

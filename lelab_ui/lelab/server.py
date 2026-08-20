@@ -811,7 +811,7 @@ def _operator_took_over(arm: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# I/O configuration (persisted so openarm_teleop.sh picks it up on restart)
+# I/O configuration (persisted so oarm7dof_teleop.sh picks it up on restart)
 # ---------------------------------------------------------------------------
 
 IO_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".config", "lelab", "io_config.json")
@@ -905,7 +905,7 @@ _CAPS_REPUSH_PERIOD_S = 5.0
 def _ensure_persisted_caps_applied() -> None:
     """Re-assert the saved torque caps to the bridge, periodically.
 
-    Deliberately NOT once-per-run. It was, and that was a bug: openarm_teleop.sh
+    Deliberately NOT once-per-run. It was, and that was a bug: oarm7dof_teleop.sh
     starts lelab BEFORE the bridge, and /exo/ui_command is VOLATILE, so a single
     push made before the bridge existed reached no subscriber and was never
     retried -- leaving the bridge with no cap while the UI happily showed one.
@@ -1225,7 +1225,7 @@ def get_io_config():
     Current I/O settings plus whether they match the running processes.
 
     `requires_restart` is the point of this endpoint: these settings are read by
-    openarm_teleop.sh at launch, so toggling one changes nothing until teleop is
+    oarm7dof_teleop.sh at launch, so toggling one changes nothing until teleop is
     restarted. Reporting the live state lets the UI say so instead of implying
     the change took effect.
     """
@@ -1527,7 +1527,7 @@ def set_recording_camera_device(cam_name: str, body: CameraDeviceUpdate):
                 import time as _time
                 active_robot._camera_last_good[cam_name] = _time.monotonic()
             # Update USB mapping
-            from lelab.robots.openarm_ros import _get_usb_path_for_device
+            from lelab.robots.oarm7dof_ros import _get_usb_path_for_device
             active_robot._camera_usb_paths[cam_name] = _get_usb_path_for_device(new_dev)
         except Exception as e:
             logger.error(f"Failed to connect camera {cam_name} to {new_dev}: {e}")
@@ -2043,22 +2043,22 @@ def delete_calibration_config(device_type: str, config_name: str):
 
 # ============================================================================
 # ============================================================================
-# OPENARM CAN-FD CALIBRATION (Enactic OpenArm via PEAK CAN-FD board)
+# 7DOF-OARM CAN-FD CALIBRATION (Enactic 7DOF-OArm via PEAK CAN-FD board)
 # ============================================================================
 
-class OpenArmCanStatusBody(BaseModel):
+class OArm7DOFCanStatusBody(BaseModel):
     channel: str = "PCAN_USBBUS1"   # PEAK CAN channel
     bitrate: int = 1000000
     bitrate_fd: int = 8000000
 
 
-class OpenArmCanZeroBody(BaseModel):
+class OArm7DOFCanZeroBody(BaseModel):
     channel: str = "PCAN_USBBUS1"
     joint_names: list[str]
     positions: dict[str, float]  # current raw positions to treat as zero
 
 
-class OpenArmCanSaveBody(BaseModel):
+class OArm7DOFCanSaveBody(BaseModel):
     config_name: str
     joint_names: list[str]
     zero_positions: dict[str, float]
@@ -2067,8 +2067,8 @@ class OpenArmCanSaveBody(BaseModel):
     channel: str = "PCAN_USBBUS1"
 
 
-def _read_openarm_positions(channel: str, bitrate: int, bitrate_fd: int) -> dict[str, float]:
-    """Read current joint positions from OpenArm via CAN-FD using python-can."""
+def _read_oarm7dof_positions(channel: str, bitrate: int, bitrate_fd: int) -> dict[str, float]:
+    """Read current joint positions from 7DOF-OArm via CAN-FD using python-can."""
     try:
         import can
         # On Linux, PEAK adapters appear as can0/can1 via SocketCAN by default
@@ -2090,7 +2090,7 @@ def _read_openarm_positions(channel: str, bitrate: int, bitrate_fd: int) -> dict
                 recv = bus.recv(timeout=0.05)
                 if recv is None:
                     break
-                # OpenArm CAN protocol: ID encodes joint, data encodes float32 position
+                # 7DOF-OArm CAN protocol: ID encodes joint, data encodes float32 position
                 joint_id = recv.arbitration_id & 0xFF
                 if len(recv.data) >= 4:
                     import struct
@@ -2116,19 +2116,19 @@ def _read_openarm_positions(channel: str, bitrate: int, bitrate_fd: int) -> dict
         raise
 
 
-@app.post("/openarm-can/status")
-def openarm_can_status(body: OpenArmCanStatusBody):
-    """Read current joint positions from OpenArm via CAN-FD."""
+@app.post("/oarm7dof-can/status")
+def openarm_can_status(body: OArm7DOFCanStatusBody):
+    """Read current joint positions from 7DOF-OArm via CAN-FD."""
     try:
-        positions = _read_openarm_positions(body.channel, body.bitrate, body.bitrate_fd)
+        positions = _read_oarm7dof_positions(body.channel, body.bitrate, body.bitrate_fd)
         return {"status": "success", "positions": positions, "joint_count": len(positions)}
     except Exception as e:
         return {"status": "error", "message": str(e), "positions": {}}
 
 
-@app.post("/openarm-can/save-calibration")
-def openarm_can_save_calibration(body: OpenArmCanSaveBody):
-    """Save OpenArm CAN calibration result as a JSON config file.
+@app.post("/oarm7dof-can/save-calibration")
+def openarm_can_save_calibration(body: OArm7DOFCanSaveBody):
+    """Save 7DOF-OArm CAN calibration result as a JSON config file.
 
     The saved file is placed in leLab's follower config directory so it shows
     up in the existing calibration config browser.
@@ -2150,14 +2150,14 @@ def openarm_can_save_calibration(body: OpenArmCanSaveBody):
     out_file = config_path / f"{body.config_name}.json"
     with open(out_file, "w") as f:
         _json.dump(calibration_data, f, indent=2)
-    logger.info(f"OpenArm CAN calibration saved to {out_file}")
+    logger.info(f"7DOF-OArm CAN calibration saved to {out_file}")
 
     return {"status": "success", "path": str(out_file), "config_name": body.config_name}
 
 
-@app.get("/openarm-can/calibration/{config_name}")
+@app.get("/oarm7dof-can/calibration/{config_name}")
 def openarm_can_get_calibration(config_name: str):
-    """Load a previously saved OpenArm CAN calibration."""
+    """Load a previously saved 7DOF-OArm CAN calibration."""
     import json as _json
 
     file_path = Path(FOLLOWER_CONFIG_PATH) / f"{config_name}.json"
@@ -2166,7 +2166,7 @@ def openarm_can_get_calibration(config_name: str):
     with open(file_path) as f:
         data = _json.load(f)
     if data.get("robot_type") != "openarm_can":
-        raise HTTPException(status_code=400, detail="Config is not an OpenArm CAN calibration file")
+        raise HTTPException(status_code=400, detail="Config is not an 7DOF-OArm CAN calibration file")
     return {"status": "success", "calibration": data}
 
 
@@ -2190,7 +2190,7 @@ def get_available_ports():
         except ImportError:
             pass
 
-        ports.append("openarm_ros (ROS 2 Bridge)")
+        ports.append("oarm7dof_ros (ROS 2 Bridge)")
 
         return {"status": "success", "ports": ports}
     except Exception as e:
@@ -2410,7 +2410,7 @@ def get_ros_camera_bridge_log(lines: int = 40):
 
 @app.post("/ros-camera-bridge/start")
 def start_ros_camera_bridge():
-    """Launch openarm_camera_bridge_node.py, and report whether it SURVIVED.
+    """Launch oarm7dof_camera_bridge_node.py, and report whether it SURVIVED.
 
     Refuses outright unless ROS camera mode is enabled on the I/O Configuration
     page. That page is meant to be the one place deciding record vs. ROS camera
@@ -2446,7 +2446,7 @@ def start_ros_camera_bridge():
         stop_camera_bridge()
         time.sleep(0.2)
 
-        bridge_script = Path(__file__).parent.parent.parent / "src" / "qnbot_teleoperator" / "scripts" / "openarm_camera_bridge_node.py"
+        bridge_script = Path(__file__).parent.parent.parent / "src" / "qnbot_teleoperator" / "scripts" / "oarm7dof_camera_bridge_node.py"
         if not bridge_script.is_file():
             raise HTTPException(status_code=404, detail=f"Bridge script not found: {bridge_script}")
 

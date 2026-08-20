@@ -284,7 +284,7 @@ class RecordingRequest(BaseModel):
     arm_mode: str = "both"  # "left", "right", or "both"
     home_position_id: str | None = None  # ID of the chosen arm position for homing
     robot_name: str | None = None  # Name of the robot to lookup position
-    # Add derived ee_pose/gripper_state observation dims (openarm_ros only). Off
+    # Add derived ee_pose/gripper_state observation dims (oarm7dof_ros only). Off
     # unless asked for: the persisted default lives in io_config.json and the UI
     # sends it explicitly, so an omitted field means "raw joints only".
     include_ee_pose: bool = False
@@ -701,9 +701,9 @@ def _ros_camera_bridge_enabled() -> bool:
         return False
 
 
-# OpenArm backends: cameras/state are served by the backend itself, not by
+# 7DOF-OArm backends: cameras/state are served by the backend itself, not by
 # lerobot camera objects, and both need the same recording-loop treatment.
-_OPENARM_ROBOT_TYPES = ("openarm_ros", "openarm_direct")
+_OARM7DOF_ROBOT_TYPES = ("oarm7dof_ros", "oarm7dof_direct")
 
 
 def create_record_config(request: RecordingRequest) -> RecordConfig:
@@ -757,10 +757,17 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
             )
 
     # Create robot config
-    if "openarm_ros" in request.follower_port or "ROS2 (humble)" in request.follower_port:
-        from lelab.robots.openarm_ros import OpenArmRosRobotConfig, PassiveROSTeleopConfig
-        from lelab.robots.openarm_direct import (
-            OpenArmDirectRobotConfig,
+    # "openarm_ros" is the pre-rename token: robot records saved before the
+    # 7DOF-OArm rename still carry it, and dropping it would silently downgrade
+    # those robots to the serial path.
+    if (
+        "oarm7dof_ros" in request.follower_port
+        or "openarm_ros" in request.follower_port
+        or "ROS2 (humble)" in request.follower_port
+    ):
+        from lelab.robots.oarm7dof_ros import OArm7DOFRosRobotConfig, PassiveROSTeleopConfig
+        from lelab.robots.oarm7dof_direct import (
+            OArm7DOFDirectRobotConfig,
             load_camera_devices,
         )
 
@@ -773,7 +780,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         _camera_devices = load_camera_devices(request.arm_mode)
 
         if _ros_bridge:
-            robot_config = OpenArmRosRobotConfig(
+            robot_config = OArm7DOFRosRobotConfig(
                 cameras={},  # No hardware camera objects for ROS mode
                 arm_mode=request.arm_mode,
                 ros_camera_names=list(_camera_devices.keys()),
@@ -783,7 +790,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
                 f"📷 RECORDING via ROS camera bridge: {list(_camera_devices.keys()) or 'no cameras attached'}"
             )
         else:
-            robot_config = OpenArmDirectRobotConfig(
+            robot_config = OArm7DOFDirectRobotConfig(
                 cameras={},  # devices are opened by CameraReader, not lerobot
                 arm_mode=request.arm_mode,
                 ros_camera_names=[],
@@ -833,7 +840,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
         streaming_encoding=request.streaming_encoding,
     )
     # LeRobot versions differ on whether vcodec is declared on the config
-    # dataclass. Set it after construction. OpenArm capture must never depend
+    # dataclass. Set it after construction. 7DOF-OArm capture must never depend
     # on a real-time encoder: encoding while frames are still being captured
     # can backpressure add_frame() and starve the 30 FPS capture loop. That is
     # why streaming_encoding is always forced off below, regardless of vcodec.
@@ -848,7 +855,7 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
     # settings that were disabled to work around the encoder-process-pool
     # freeze bug (multiprocessing forking this process's live ROS sockets and
     # threads is what caused that, not the codec choice).
-    if getattr(robot_config, "type", "") in _OPENARM_ROBOT_TYPES:
+    if getattr(robot_config, "type", "") in _OARM7DOF_ROBOT_TYPES:
         # Video encoding strategy.  With streaming off, LeRobot writes one PNG
         # per frame per camera and re-encodes them at save time.  Measured on
         # this hardware with real 640x480 camera frames: PNG encode is ~20ms
@@ -881,14 +888,14 @@ def create_record_config(request: RecordingRequest) -> RecordConfig:
             dataset_config.streaming_encoding = True
             dataset_config.vcodec = "h264"  # PyAV maps this to libx264
             logger.info(
-                "OpenArm recording: streaming video encoding enabled (libx264, "
+                "7DOF-OArm recording: streaming video encoding enabled (libx264, "
                 "no per-episode encoder-session stall)"
             )
         except Exception as e:
             dataset_config.streaming_encoding = False
             dataset_config.vcodec = "h264"
             logger.warning(
-                "OpenArm recording: libx264 unavailable (%s); falling back to the "
+                "7DOF-OArm recording: libx264 unavailable (%s); falling back to the "
                 "PNG-then-encode path. Expect higher CPU load during capture.",
                 e,
             )
@@ -2178,7 +2185,7 @@ def custom_record_loop(
             elif isinstance(action_values, np.ndarray):
                 action_values = np.array(current_state, dtype=np.float32)
             elif isinstance(action_values, dict):
-                # Preserve dict format for robots like openarm_ros
+                # Preserve dict format for robots like oarm7dof_ros
                 new_action = dict(action_values)
                 if hasattr(robot.config, "joint_names"):
                     # Find if keys are suffixed with .pos
@@ -2337,18 +2344,18 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
 
     web_events.setdefault("_sync_pending_rows", [])
 
-    if getattr(cfg.robot, "type", "") == "openarm_direct":
-        from lelab.robots.openarm_direct import OpenArmDirectRobot
-        robot = OpenArmDirectRobot(cfg.robot)
-    elif getattr(cfg.robot, "type", "") == "openarm_ros":
-        from lelab.robots.openarm_ros import OpenArmRosRobot
-        robot = OpenArmRosRobot(cfg.robot)
+    if getattr(cfg.robot, "type", "") == "oarm7dof_direct":
+        from lelab.robots.oarm7dof_direct import OArm7DOFDirectRobot
+        robot = OArm7DOFDirectRobot(cfg.robot)
+    elif getattr(cfg.robot, "type", "") == "oarm7dof_ros":
+        from lelab.robots.oarm7dof_ros import OArm7DOFRosRobot
+        robot = OArm7DOFRosRobot(cfg.robot)
     else:
         robot = make_robot_from_config(cfg.robot)
     
     active_robot = robot
     if getattr(cfg.teleop, "type", "") == "passive_ros":
-        from lelab.robots.openarm_ros import PassiveROSTeleop
+        from lelab.robots.oarm7dof_ros import PassiveROSTeleop
         teleop = PassiveROSTeleop(cfg.teleop)
     else:
         teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -2360,7 +2367,7 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict, dataset_version:
     dataset_features = {**action_features, **obs_features}
 
     # Number of image/video streams actually written per frame.  This must come
-    # from the dataset schema, NOT len(robot.cameras): openarm_ros serves its
+    # from the dataset schema, NOT len(robot.cameras): oarm7dof_ros serves its
     # cameras over ROS (self._ros_camera_names) and leaves robot.cameras empty,
     # so sizing the image-writer pool off robot.cameras gave 4*0 == 0 threads.
     # LeRobot only creates an AsyncImageWriter when threads or processes are

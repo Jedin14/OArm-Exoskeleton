@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Health check for a LeRobot v2.1/v3.0 dataset recorded from the OpenArm rig.
+"""Health check for a LeRobot v2.1/v3.0 dataset recorded from the 7DOF-OArm rig.
 
 Reports what is IN the dataset and whether it is trustworthy, grouped into:
 
@@ -144,8 +144,8 @@ def main() -> None:
     rep.section("OVERVIEW")
     print(f"    codebase_version  {info.get('codebase_version')}")
     print(f"    robot_type        {info.get('robot_type')}"
-          + ("   (direct CAN + direct cameras)" if info.get("robot_type") == "openarm_direct"
-             else "   (ROS bridge path)" if info.get("robot_type") == "openarm_ros" else ""))
+          + ("   (direct CAN + direct cameras)" if info.get("robot_type") == "oarm7dof_direct"
+             else "   (ROS bridge path)" if info.get("robot_type") == "oarm7dof_ros" else ""))
     print(f"    fps               {fps}")
     print(f"    episodes/frames   {info.get('total_episodes')} / {info.get('total_frames')}")
     print(f"    splits            {info.get('splits')}")

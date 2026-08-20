@@ -13,7 +13,7 @@ interface IOConfig {
 }
 
 /**
- * I/O settings that openarm_teleop.sh reads at launch.
+ * I/O settings that oarm7dof_teleop.sh reads at launch.
  *
  * These are persisted to ~/.config/lelab/io_config.json rather than applied
  * live, because the launcher decides which bridges to start. So the page has to
@@ -105,7 +105,7 @@ const IOConfigPage = () => {
 
         <h1 className="text-3xl font-bold mb-2">I/O Configuration</h1>
         <p className="text-gray-400 mb-8">
-          How observations are captured. Read by <code>openarm_teleop.sh</code> at launch.
+          How observations are captured. Read by <code>oarm7dof_teleop.sh</code> at launch.
         </p>
 
         {needsRestart && (
@@ -120,7 +120,7 @@ const IOConfigPage = () => {
               </div>
               <pre className="mt-2 p-2 bg-black/40 rounded text-xs overflow-x-auto">
 {`# Ctrl+C the running teleop, then:
-./openarm_teleop.sh --real --ws-port 19191 --lelab`}
+./oarm7dof_teleop.sh --real --ws-port 19191 --lelab`}
               </pre>
             </div>
           </div>

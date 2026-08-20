@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-safety_watchdog.py — OpenArm Torque / Velocity Safety Watchdog
+safety_watchdog.py — 7DOF-OArm Torque / Velocity Safety Watchdog
 
 Monitors all arm motors over CAN in real-time and immediately disables
 ALL motors if any joint exceeds a safe torque or velocity threshold.
@@ -179,7 +179,7 @@ def monitor_loop(arms, torque_frac, velocity_frac, limits):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenArm safety torque watchdog")
+    parser = argparse.ArgumentParser(description="7DOF-OArm safety torque watchdog")
     parser.add_argument("--both",     action="store_true", help="Monitor both arms (can0 + can1)")
     parser.add_argument("--torque",   type=float, default=DEFAULT_TORQUE_FRACTION,
                         help=f"Torque trip fraction of tMax (default {DEFAULT_TORQUE_FRACTION})")
@@ -189,7 +189,7 @@ def main():
 
     limits = get_motor_limits()
 
-    print(f"{BOLD}OpenArm Safety Watchdog{RESET}")
+    print(f"{BOLD}7DOF-OArm Safety Watchdog{RESET}")
     print(f"Initialising {'both arms' if args.both else 'right arm (can0)'}...")
 
     try:

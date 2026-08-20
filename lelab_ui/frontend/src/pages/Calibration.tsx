@@ -247,7 +247,7 @@ const Calibration = () => {
     }
 
     // Bypass calibration for ROS 2 Bridge
-    if (port.startsWith("openarm_ros") || port.startsWith("ROS2 (humble)")) {
+    if (port.startsWith("oarm7dof_ros") || port.startsWith("openarm_ros") || port.startsWith("ROS2 (humble)")) {
       try {
         const payload = deviceType === "robot" 
           ? { follower_port: port, follower_config: robotName } 
@@ -629,7 +629,7 @@ const Calibration = () => {
                     />
                   )}
                 </div>
-                {(port.startsWith("ROS2 (humble)") || port.startsWith("openarm_ros")) && (
+                {(port.startsWith("ROS2 (humble)") || port.startsWith("oarm7dof_ros") || port.startsWith("openarm_ros")) && (
                   <div className="text-xs text-blue-400 mt-2 font-mono">
                     Subscribing to: /joint_states, /tf, /robot_description
                   </div>

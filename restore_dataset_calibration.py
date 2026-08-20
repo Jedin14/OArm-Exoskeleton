@@ -20,7 +20,7 @@ def list_datasets():
     return sorted(valid_datasets)
 
 def main():
-    print("=== OpenArm Manual Zero Calibration ===")
+    print("=== 7DOF-OArm Manual Zero Calibration ===")
     print("This script allows you to skip the long bump-to-limit calibration.")
     print("It will force the current physical position of the arms to be the new zero.")
     

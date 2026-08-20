@@ -44,7 +44,7 @@ def _soft_limit(x: float, lower: float, upper: float, knee: float = 0.85) -> flo
     action whenever the operator over-reaches. Repeated across an episode that
     creates a large point mass at the rail — a confident, scene-independent
     label that teaches a policy "this joint is often exactly at the limit".
-    On OpenArm v10, joint6 (+/-45deg, the narrowest joint) saturated in 15% of
+    On 7DOF-OArm v10, joint6 (+/-45deg, the narrowest joint) saturated in 15% of
     recorded episodes this way.
 
     Soft limiting keeps the joint inside its mechanical range while mapping the
@@ -93,7 +93,7 @@ class ExoRetargetingNode(Node):
         super().__init__('exo_retargeting_node')
         
         # 参数声明 - 只保留最基本的参数
-        self.declare_parameter('robot_type', 'OpenArm')
+        self.declare_parameter('robot_type', '7DOF-OArm')
         self.declare_parameter('enable_left_arm_retargeting', True)
         self.declare_parameter('enable_right_arm_retargeting', True)
         
@@ -547,7 +547,7 @@ class ExoRetargetingNode(Node):
         """
         核心retargeting算法层 - 实现外骨骼到目标机器人的关节映射变换
         
-        OpenArm处理：
+        7DOF-OArm处理：
         - 所有关节统一使用缩放和偏移映射
         
         支持新的左右臂分离配置格式：

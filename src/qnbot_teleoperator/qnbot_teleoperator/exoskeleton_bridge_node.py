@@ -67,7 +67,7 @@ class ExoskeletonBridgeNode(Node):
         # set by GRIPPER_DEFAULT_KP/KD in v10_simple_hardware.hpp (20.0 / 2.5)
         # rather than by a per-goal max_effort.
         # CAN interfaces, used only to read gripper torque for the force cap
-        # (passive/read-only). Defaults match openarm_teleop.sh's RIGHT_CAN/LEFT_CAN.
+        # (passive/read-only). Defaults match oarm7dof_teleop.sh's RIGHT_CAN/LEFT_CAN.
         self.declare_parameter('right_can_interface', 'can0')
         self.declare_parameter('left_can_interface', 'can1')
         self.declare_parameter('gripper_min_position_m', 0.0)
@@ -490,7 +490,7 @@ class ExoskeletonBridgeNode(Node):
     def _load_persisted_torque_caps(self):
         """Read the gripper torque caps from lelab's config file at startup.
 
-        THE CAP MUST NOT DEPEND ON A ROS HANDSHAKE. openarm_teleop.sh starts lelab
+        THE CAP MUST NOT DEPEND ON A ROS HANDSHAKE. oarm7dof_teleop.sh starts lelab
         BEFORE this node, and lelab pushed the cap once over /exo/ui_command with
         VOLATILE durability -- so if anything polled it before this node existed,
         the message went to no subscriber and was never re-sent. This node then ran
@@ -527,16 +527,16 @@ class ExoskeletonBridgeNode(Node):
         import os
         import sys
 
-        root = os.environ.get("OPENARM_REPO_ROOT") or str(
+        root = os.environ.get("OARM7DOF_REPO_ROOT") or str(
             Path(__file__).resolve().parents[3]
         )
         if root not in sys.path:
             sys.path.insert(0, root)
         try:
-            import openarm_direct_io as io
+            import oarm7dof_direct_io as io
         except Exception as e:
             self.get_logger().warn(
-                f"openarm_direct_io unavailable ({e}); gripper torque cap disabled"
+                f"oarm7dof_direct_io unavailable ({e}); gripper torque cap disabled"
             )
             return
 
@@ -924,7 +924,7 @@ class ExoskeletonBridgeNode(Node):
             # Also to a file, because that is the channel lelab can actually read:
             # its venv is python3.12 with no rclpy (which is why _send_ui_command
             # falls back to a subprocess publisher), so a ROS topic can never reach
-            # it. Same approach openarm_camera_bridge_node.py already uses for
+            # it. Same approach oarm7dof_camera_bridge_node.py already uses for
             # /tmp/lelab_camera_status.json.
             #
             # Non-blocking hand-off ONLY -- the actual file I/O happens on

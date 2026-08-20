@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-OpenArm机器人显示Launch文件（带外骨骼集成）
-用于启动OpenArm双臂机器人显示和外骨骼集成
+7DOF-OArm机器人显示Launch文件（带外骨骼集成）
+用于启动7DOF-OArm双臂机器人显示和外骨骼集成
 
 使用方法:
-ros2 launch qnbot_teleoperator openarm_display.launch.py use_exoskeleton:=true
+ros2 launch qnbot_teleoperator oarm7dof_display.launch.py use_exoskeleton:=true
 """
 
 import os
@@ -20,7 +20,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def robot_state_publisher_spawner(context: LaunchContext, arm_type, ee_type):
-    """生成OpenArm robot_state_publisher节点"""
+    """生成7DOF-OArm robot_state_publisher节点"""
     arm_type_str = context.perform_substitution(arm_type)
     ee_type_str = context.perform_substitution(ee_type)
 
@@ -56,13 +56,13 @@ def generate_launch_description():
     """生成launch描述"""
     
     # 获取包目录
-    openarm_pkg_dir = get_package_share_directory('openarm_description')
+    oarm7dof_pkg_dir = get_package_share_directory('openarm_description')
     
     # 声明launch参数
     arm_type_arg = DeclareLaunchArgument(
         'arm_type',
         default_value='v10',
-        description='OpenArm手臂类型 (e.g., v10)'
+        description='7DOF-OArm手臂类型 (e.g., v10)'
     )
     
     ee_type_arg = DeclareLaunchArgument(
@@ -99,7 +99,7 @@ def generate_launch_description():
     arm_type = LaunchConfiguration('arm_type')
     ee_type = LaunchConfiguration('ee_type')
     
-    # OpenArm Robot State Publisher
+    # 7DOF-OArm Robot State Publisher
     robot_state_publisher_loader = OpaqueFunction(
         function=robot_state_publisher_spawner,
         args=[arm_type, ee_type]
@@ -153,11 +153,11 @@ def generate_launch_description():
         ]))
     )
     
-    # OpenArm TF桥接节点 - 将外骨骼手臂TF映射到OpenArm肩膀
-    openarm_tf_bridge_node = Node(
+    # 7DOF-OArm TF桥接节点 - 将外骨骼手臂TF映射到7DOF-OArm肩膀
+    oarm7dof_tf_bridge_node = Node(
         package='qnbot_teleoperator',
-        executable='openarm_exo_tf_bridge_node',
-        name='openarm_exo_tf_bridge_node',
+        executable='oarm7dof_exo_tf_bridge_node',
+        name='oarm7dof_exo_tf_bridge_node',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time'),
             'exo_namespace': 'exoskeleton',
@@ -170,11 +170,11 @@ def generate_launch_description():
         output='screen'
     )
     
-    # OpenArm手臂关节合并节点 - 将手臂命令合并到joint_states
-    openarm_arm_joint_merger_node = Node(
+    # 7DOF-OArm手臂关节合并节点 - 将手臂命令合并到joint_states
+    oarm7dof_arm_joint_merger_node = Node(
         package='qnbot_teleoperator',
-        executable='openarm_arm_joint_merger',
-        name='openarm_arm_joint_merger',
+        executable='oarm7dof_arm_joint_merger',
+        name='oarm7dof_arm_joint_merger',
         parameters=[{
             'use_sim_time': LaunchConfiguration('use_sim_time')
         }],
@@ -182,8 +182,8 @@ def generate_launch_description():
         output='screen'
     )
     
-    # RViz节点 - 使用OpenArm的双臂配置
-    rviz_config_path = os.path.join(openarm_pkg_dir, 'rviz', 'bimanual.rviz')
+    # RViz节点 - 使用7DOF-OArm的双臂配置
+    rviz_config_path = os.path.join(oarm7dof_pkg_dir, 'rviz', 'bimanual.rviz')
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -209,8 +209,8 @@ def generate_launch_description():
         joint_state_publisher_gui_node,
         joint_state_publisher_node,
         exoskeleton_display_launch,      # 添加外骨骼显示
-        openarm_tf_bridge_node,          # 添加OpenArm TF桥接节点
-        openarm_arm_joint_merger_node,   # 添加OpenArm手臂关节合并节点
+        oarm7dof_tf_bridge_node,          # 添加7DOF-OArm TF桥接节点
+        oarm7dof_arm_joint_merger_node,   # 添加7DOF-OArm手臂关节合并节点
         rviz_node
     ])
 

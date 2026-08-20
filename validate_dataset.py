@@ -2,7 +2,7 @@
 """
 Gate a LeRobot dataset before it is used for VLA/ACT training.
 
-Checks each action dimension against the OpenArm v10 mechanical limits and
+Checks each action dimension against the 7DOF-OArm v10 mechanical limits and
 fails on the failure mode that silently corrupted Pick_Drop_500: joints pinned
 at their limit by np.clip during retargeting. Those frames carry a confident,
 scene-independent label, and a policy trained on them cannot predict the joint

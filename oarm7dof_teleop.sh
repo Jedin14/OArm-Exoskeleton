@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# OpenArm exoskeleton teleoperation — single-script launcher
+# 7DOF-OArm exoskeleton teleoperation — single-script launcher
 #
-# Starts the full pipeline from "Exoskeleton teleoperation Openarm.pdf":
+# Starts the full pipeline from "Exoskeleton teleoperation 7DOF-OArm.pdf":
 #   1. WebSocket server (receives exoskeleton data on port 19091)
-#   2. Exoskeleton retargeting (exo -> OpenArm joint commands)
-#   3. OpenArm bimanual hardware / simulation (ros2_control)
+#   2. Exoskeleton retargeting (exo -> 7DOF-OArm joint commands)
+#   3. 7DOF-OArm bimanual hardware / simulation (ros2_control)
 #   4. Exoskeleton bridge (joint commands -> forward_position_controller)
 #
 # Usage:
-#   ./openarm_teleop.sh              # simulation (default, safe)
-#   ./openarm_teleop.sh --real       # real hardware (CAN required)
-#   ./openarm_teleop.sh --lelab      # also launch leLab web UI (training/datasets)
-#   ./openarm_teleop.sh --help
+#   ./oarm7dof_teleop.sh              # simulation (default, safe)
+#   ./oarm7dof_teleop.sh --real       # real hardware (CAN required)
+#   ./oarm7dof_teleop.sh --lelab      # also launch leLab web UI (training/datasets)
+#   ./oarm7dof_teleop.sh --help
 #
 # Before teleop (on the exoskeleton host PC):
 #   - Add forwarding address: ws://<this-pc-ip>:19091  (or ws://localhost:19091)
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WS_DIR="${OPENARM_WS:-$SCRIPT_DIR}"
+WS_DIR="${OARM7DOF_WS:-$SCRIPT_DIR}"
 
 # Defaults (match PDF / 外骨骼遥操作步骤)
 USE_FAKE_HARDWARE="true"
@@ -69,14 +69,14 @@ LELAB_PORT="8000"
 
 usage() {
     cat <<'EOF'
-OpenArm exoskeleton teleoperation launcher
+7DOF-OArm exoskeleton teleoperation launcher
 
 Usage:
-  openarm_teleop.sh [OPTIONS]
+  oarm7dof_teleop.sh [OPTIONS]
 
 Options:
   --sim                 Use fake hardware (default, recommended first)
-  --real                Use real OpenArm hardware over CAN
+  --real                Use real 7DOF-OArm hardware over CAN
   --can                 Alias for --real (requested hardware mode)
   --waveshare           Configure SocketCAN as Waveshare USB-CAN-FD-B
   --right-can IF        Right arm CAN interface (default: can0)
@@ -99,7 +99,7 @@ Options:
   -h, --help            Show this help
 
 Environment:
-  OPENARM_WS            Workspace root (default: script directory)
+  OARM7DOF_WS            Workspace root (default: script directory)
   ROS_DISTRO            ROS 2 distro to source (default: humble)
 
 Exoskeleton host setup:
@@ -110,8 +110,8 @@ Exoskeleton host setup:
 EOF
 }
 
-log() { echo "[openarm_teleop] $*"; }
-err() { echo "[openarm_teleop] ERROR: $*" >&2; }
+log() { echo "[oarm7dof_teleop] $*"; }
+err() { echo "[oarm7dof_teleop] ERROR: $*" >&2; }
 
 run_privileged() {
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -127,7 +127,7 @@ run_privileged() {
     return 1
 }
 
-ensure_openarm_hardware_plugin_registry() {
+ensure_oarm7dof_hardware_plugin_registry() {
     local pkg_prefix resource_file build_resource xml_file expected_rel
 
     expected_rel="share/openarm_hardware/openarm_hardware.xml"
@@ -304,7 +304,7 @@ kill_matching_processes() {
 }
 
 cleanup_previous_teleop_processes() {
-    log "Clean start enabled: stopping previous OpenArm teleop/ROS/RViz processes ..."
+    log "Clean start enabled: stopping previous 7DOF-OArm teleop/ROS/RViz processes ..."
 
     # Target known stale processes that can conflict with controller_manager.
     local patterns=(
@@ -322,7 +322,7 @@ cleanup_previous_teleop_processes() {
         "robot_state_publisher"
         "joint_state_broadcaster"
         "rviz2"
-        "openarm_teleop.sh --"
+        "oarm7dof_teleop.sh --"
         "deploy_act_policy.py"
     )
 
@@ -430,7 +430,7 @@ ensure_qnbot_dist_info() {
 Metadata-Version: 2.1
 Name: qnbot-teleoperator
 Version: 0.0.0
-Summary: WebSocket teleoperator for OpenArm exoskeleton
+Summary: WebSocket teleoperator for 7DOF-OArm exoskeleton
 METAEOF
 
     echo "pip"      > "$dist_info/INSTALLER"
@@ -451,7 +451,7 @@ done
 ensure_qnbot_dist_info
 
 if [[ "$USE_FAKE_HARDWARE" == "false" ]]; then
-    ensure_openarm_hardware_plugin_registry
+    ensure_oarm7dof_hardware_plugin_registry
     maybe_fallback_to_vcan
     if [[ "$USE_WAVESHARE" == "true" ]]; then
         ensure_waveshare_ready "$RIGHT_CAN"
@@ -474,7 +474,7 @@ fi
 
 # RViz needs real mesh files (empty/LFS placeholders show a red RobotModel error)
 MESH_CHECK="$WS_DIR/src/openarm_description/meshes/arm/v10/visual/link1.dae"
-MESH_SRC="${OPENARM_MESH_SOURCE:-$HOME/openarm_ros2_ws/src/openarm_description}"
+MESH_SRC="${OARM7DOF_MESH_SOURCE:-$HOME/openarm_ros2_ws/src/openarm_description}"
 if [[ -f "$MESH_CHECK" ]] && ! grep -aq 'COLLADA' "$MESH_CHECK" 2>/dev/null; then
     if [[ -f "$MESH_SRC/meshes/arm/v10/visual/link1.dae" ]] \
         && grep -aq 'COLLADA' "$MESH_SRC/meshes/arm/v10/visual/link1.dae" 2>/dev/null; then
@@ -502,7 +502,7 @@ if [[ -f "$MESH_CHECK" ]] && ! grep -aq 'COLLADA' "$MESH_CHECK" 2>/dev/null; the
     fi
 fi
 
-LOG_DIR="$(mktemp -d /tmp/openarm_teleop.XXXXXX)"
+LOG_DIR="$(mktemp -d /tmp/oarm7dof_teleop.XXXXXX)"
 cleanup() {
     local pid
     log "Shutting down (logs: $LOG_DIR)..."
@@ -589,13 +589,13 @@ if [[ "$LAUNCH_LELAB" == "true" ]]; then
     # direct reader cannot open it. The two paths cannot both run.
     #
     # Enable only when you deliberately want the ROS topics (e.g. RViz):
-    #   ./openarm_teleop.sh --ros-camera
+    #   ./oarm7dof_teleop.sh --ros-camera
     # or persist it from the leLab config page, which writes ros_camera into
     # ~/.config/lelab/io_config.json (read above).
     if [[ "$USE_ROS_CAMERA" == "true" ]]; then
         log "Starting ROS 2 Camera Bridge (--ros-camera) ..."
         launch_step ros2_camera_bridge \
-            /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/openarm_camera_bridge_node.py"
+            /usr/bin/python3 "$SCRIPT_DIR/src/qnbot_teleoperator/scripts/oarm7dof_camera_bridge_node.py"
     else
         log "ROS camera bridge DISABLED (direct OpenCV capture). Enable with --ros-camera."
     fi
@@ -614,12 +614,12 @@ else
         websocket_port:="$WEBSOCKET_PORT"
 fi
 
-# Step 2: Exoskeleton retargeting -> OpenArm
+# Step 2: Exoskeleton retargeting -> 7DOF-OArm
 launch_step exo_retargeting \
     ros2 launch qnbot_teleoperator exo_retargeting.launch.py \
-    robot_type:=OpenArm
+    robot_type:=7DOF-OArm
 
-# Step 3: OpenArm bimanual (ros2_control + RViz)
+# Step 3: 7DOF-OArm bimanual (ros2_control + RViz)
 # Use a longer delay so hardware has time to initialise before the bridge connects
 SAVED_DELAY="$STARTUP_DELAY"
 STARTUP_DELAY=$(( STARTUP_DELAY > 5 ? STARTUP_DELAY : 6 ))

@@ -113,7 +113,7 @@ def main():
         
     print("Shutting down LeLab UI...")
     subprocess.run(["pkill", "-f", "uvicorn lelab.server:app"])
-    subprocess.run(["pkill", "-f", "openarm_teleop.sh"])
+    subprocess.run(["pkill", "-f", "oarm7dof_teleop.sh"])
 
 if __name__ == '__main__':
     main()

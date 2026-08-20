@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenArm手臂关节合并节点
+7DOF-OArm手臂关节合并节点
 订阅/left_arm/joint_command和/right_arm/joint_command话题
 将手臂关节状态合并到完整的joint_state消息中发布
 
@@ -21,11 +21,11 @@ import threading
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 
-class OpenArmArmJointMerger(Node):
+class OArm7DOFArmJointMerger(Node):
     def __init__(self):
-        super().__init__('openarm_arm_joint_merger')
+        super().__init__('oarm7dof_arm_joint_merger')
 
-        # OpenArm手臂关节名称（7自由度，不含夹爪）
+        # 7DOF-OArm手臂关节名称（7自由度，不含夹爪）
         self.left_arm_joints = [
             'openarm_left_joint1', 'openarm_left_joint2', 'openarm_left_joint3',
             'openarm_left_joint4', 'openarm_left_joint5', 'openarm_left_joint6',
@@ -79,7 +79,7 @@ class OpenArmArmJointMerger(Node):
         # 50 Hz publish timer
         self.timer = self.create_timer(0.02, self.publish_merged_joint_state)
 
-        self.get_logger().info('✅ OpenArm手臂关节合并节点已启动')
+        self.get_logger().info('✅ 7DOF-OArm手臂关节合并节点已启动')
         self.get_logger().info('   - 订阅左臂话题: /left_arm/joint_command')
         self.get_logger().info('   - 订阅右臂话题: /right_arm/joint_command')
         self.get_logger().info('   - 订阅GUI话题: /joint_states_gui')
@@ -188,7 +188,7 @@ class OpenArmArmJointMerger(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = OpenArmArmJointMerger()
+    node = OArm7DOFArmJointMerger()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

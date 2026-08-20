@@ -65,9 +65,9 @@ def check_if_already_connected(func):
 from dataclasses import dataclass, field
 
 @dataclass(kw_only=True)
-class OpenArmRosRobotConfig(RobotConfig):
-    """Configuration for OpenArm running inside ROS 2 via UDP bridge."""
-    type: str = "openarm_ros"
+class OArm7DOFRosRobotConfig(RobotConfig):
+    """Configuration for 7DOF-OArm running inside ROS 2 via UDP bridge."""
+    type: str = "oarm7dof_ros"
     cameras: dict = field(default_factory=dict)
     arm_mode: str = "both"  # "left", "right", or "both"
     ros_camera_names: list = field(default_factory=list)
@@ -89,16 +89,16 @@ class OpenArmRosRobotConfig(RobotConfig):
         return names
 
 
-class OpenArmRosRobot(Robot):
+class OArm7DOFRosRobot(Robot):
     """
     A Robot backend that listens to ROS 2 joint states and commands via a local UDP bridge.
     It passively reads the ROS 2 teleoperation stream instead of writing to hardware.
     """
 
-    config_class = OpenArmRosRobotConfig
-    name = "openarm_ros"
+    config_class = OArm7DOFRosRobotConfig
+    name = "oarm7dof_ros"
 
-    def __init__(self, config: OpenArmRosRobotConfig):
+    def __init__(self, config: OArm7DOFRosRobotConfig):
         super().__init__(config)
         self.config = config
         
@@ -705,7 +705,7 @@ class PassiveROSTeleopConfig(TeleoperatorConfig):
     type: str = "passive_ros"
 
 class PassiveROSTeleop(Teleoperator):
-    """A dummy teleoperator that returns actions passively captured by OpenArmRosRobot."""
+    """A dummy teleoperator that returns actions passively captured by OArm7DOFRosRobot."""
     config_class = PassiveROSTeleopConfig
     name = "passive_ros"
 
@@ -755,4 +755,4 @@ class PassiveROSTeleop(Teleoperator):
 
 # Register the configs
 TeleoperatorConfig.register_subclass("passive_ros")(PassiveROSTeleopConfig)
-RobotConfig.register_subclass("openarm_ros")(OpenArmRosRobotConfig)
+RobotConfig.register_subclass("oarm7dof_ros")(OArm7DOFRosRobotConfig)

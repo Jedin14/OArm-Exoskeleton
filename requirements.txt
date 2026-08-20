@@ -1,4 +1,4 @@
-# OpenArm Teleop Python dependencies
+# 7DOF-OArm Teleop Python dependencies
 #
 # This file installs the Python packages used by the workspace utilities and
 # the leLab UI. It does not replace ROS 2, CAN drivers, or other system-level

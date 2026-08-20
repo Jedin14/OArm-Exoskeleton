@@ -101,7 +101,12 @@ const RecordingModal: React.FC<RecordingModalProps> = ({
 }) => {
   const { auth } = useHfAuth();
   const { baseUrl, fetchWithHeaders } = useApi();
-  const isRosMode = !!(robot?.follower_port?.includes("openarm_ros") || robot?.follower_port?.includes("ROS2"));
+  // "openarm_ros" is the pre-rename token, still present in older robot records.
+  const isRosMode = !!(
+    robot?.follower_port?.includes("oarm7dof_ros") ||
+    robot?.follower_port?.includes("openarm_ros") ||
+    robot?.follower_port?.includes("ROS2")
+  );
   const [rosMappings, setRosMappings] = React.useState<Array<{name: string; device_index: number | string}>>([]);
   const [positions, setPositions] = React.useState<Array<any>>([]);
 

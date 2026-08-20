@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenArm robot backend that records through the SAME path deployment uses.
+7DOF-OArm robot backend that records through the SAME path deployment uses.
 
 WHY
 ---
@@ -61,7 +61,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .openarm_ros import OpenArmRosRobot, OpenArmRosRobotConfig
+from .oarm7dof_ros import OArm7DOFRosRobot, OArm7DOFRosRobotConfig
 
 logger = logging.getLogger(__name__)
 
@@ -99,23 +99,23 @@ def load_camera_devices(arm_mode: str = "both") -> dict[str, str]:
 
 
 def _direct_io_module():
-    """Import openarm_direct_io from the repo root.
+    """Import oarm7dof_direct_io from the repo root.
 
-    lelab is installed as a package but openarm_direct_io.py lives at the repo
+    lelab is installed as a package but oarm7dof_direct_io.py lives at the repo
     root next to deploy_act_policy.py, so it is not importable by default.
     Resolved from this file's location (repo/lelab_ui/lelab/robots/…), with
-    OPENARM_REPO_ROOT as an override for non-standard layouts.
+    OARM7DOF_REPO_ROOT as an override for non-standard layouts.
     """
-    root = os.environ.get("OPENARM_REPO_ROOT") or str(Path(__file__).resolve().parents[3])
+    root = os.environ.get("OARM7DOF_REPO_ROOT") or str(Path(__file__).resolve().parents[3])
     if root not in sys.path:
         sys.path.insert(0, root)
-    import openarm_direct_io  # noqa: PLC0415
+    import oarm7dof_direct_io  # noqa: PLC0415
 
-    return openarm_direct_io
+    return oarm7dof_direct_io
 
 
 @dataclass(kw_only=True)
-class OpenArmDirectRobotConfig(OpenArmRosRobotConfig):
+class OArm7DOFDirectRobotConfig(OArm7DOFRosRobotConfig):
     """
     Direct-I/O variant. Inherits arm_mode / cameras / joint_names.
 
@@ -123,7 +123,7 @@ class OpenArmDirectRobotConfig(OpenArmRosRobotConfig):
     so it adds nothing a policy cannot derive, and dropping it keeps
     observation.state matching action 1:1 (8 dims).
     """
-    type: str = "openarm_direct"
+    type: str = "oarm7dof_direct"
     include_ee_pose: bool = False
 
     # CAN interfaces per arm and the DM motor feedback (master) ids.
@@ -170,7 +170,7 @@ class OpenArmDirectRobotConfig(OpenArmRosRobotConfig):
     gripper_max_m: float = 0.044
 
 
-class OpenArmDirectRobot(OpenArmRosRobot):
+class OArm7DOFDirectRobot(OArm7DOFRosRobot):
     """
     Observations straight from hardware; actions still from the ROS bridge.
 
@@ -179,10 +179,10 @@ class OpenArmDirectRobot(OpenArmRosRobot):
     sources are replaced.
     """
 
-    config_class = OpenArmDirectRobotConfig
-    name = "openarm_direct"
+    config_class = OArm7DOFDirectRobotConfig
+    name = "oarm7dof_direct"
 
-    def __init__(self, config: OpenArmDirectRobotConfig):
+    def __init__(self, config: OArm7DOFDirectRobotConfig):
         super().__init__(config)
         self.direct_config = config
         self._state_readers: dict[str, object] = {}
@@ -248,7 +248,7 @@ class OpenArmDirectRobot(OpenArmRosRobot):
             # Position was unaffected (identical p_max), which is exactly why
             # the position validation passed while torque was wrong.
             limits = {
-                cid: io.OPENARM_MOTOR_LIMITS.get(cid & 0xFF, DM4310)
+                cid: io.OARM7DOF_MOTOR_LIMITS.get(cid & 0xFF, DM4310)
                 for cid in self.direct_config.recv_ids
             }
             reader = StateReader(ch, list(self.direct_config.recv_ids), limits, fd=True)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Direct, timestamped I/O for OpenArm: cameras via OpenCV, motor state via CAN.
+Direct, timestamped I/O for 7DOF-OArm: cameras via OpenCV, motor state via CAN.
 
 WHY THIS EXISTS
 ---------------
@@ -101,13 +101,13 @@ DM4310 = MotorLimits(12.5, 30.0, 10.0)
 DM4340 = MotorLimits(12.5, 8.0, 28.0)
 DM8009 = MotorLimits(12.5, 45.0, 54.0)
 
-# One OpenArm: 7 joints + gripper, feedback (master) ids 0x11..0x18.
+# One 7DOF-OArm: 7 joints + gripper, feedback (master) ids 0x11..0x18.
 # Types mirror deploy_act_policy.py's MOTOR_TYPES + init_gripper_motor(DM4310),
 # which is the authority for what is physically on the bus. Defined here so the
 # recorder and any torque readout decode with the SAME scaling instead of each
 # picking a default.
-OPENARM_RECV_IDS = (0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18)
-OPENARM_MOTOR_LIMITS = {
+OARM7DOF_RECV_IDS = (0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18)
+OARM7DOF_MOTOR_LIMITS = {
     0x11: DM8009, 0x12: DM8009,          # J1, J2
     0x13: DM4340, 0x14: DM4340,          # J3, J4
     0x15: DM4310, 0x16: DM4310, 0x17: DM4310,   # J5, J6, J7

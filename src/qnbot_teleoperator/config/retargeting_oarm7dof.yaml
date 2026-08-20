@@ -1,10 +1,10 @@
-# OpenArm双臂机器人外骨骼重定向配置文件
+# 7DOF-OArm双臂机器人外骨骼重定向配置文件
 # 配置文件版本: 1.0
 # 依据 openarm_description/urdf 关节命名
 
 robot_info:
-  name: "OpenArm"
-  description: "OpenArm bimanual robot"
+  name: "7DOF-OArm"
+  description: "7DOF-OArm bimanual robot"
   manufacturer: "Enactic"
   version: "v10"
 
@@ -65,8 +65,8 @@ exo_joint_mapping:
     close_deadzone: 0.15
     open_deadzone: 0.10
 
-# 目标机器人（OpenArm）关节名称（URDF）
-# OpenArm使用7自由度手臂：joint1-joint7
+# 目标机器人（7DOF-OArm）关节名称（URDF）
+# 7DOF-OArm使用7自由度手臂：joint1-joint7
 # 基于 openarm_description/urdf/arm/openarm_arm.xacro
 target_joint_mapping:
   left_arm:
@@ -92,18 +92,18 @@ target_joint_mapping:
 # Retargeting变换参数（初始参数，可根据实际调整）
 retargeting_params:
   scaling_factors:
-    # OpenArm的7个关节缩放因子
+    # 7DOF-OArm的7个关节缩放因子
     left_arm:  [1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0]
     right_arm: [1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0]
 
   offset_angles:
-    # OpenArm关节偏置（单位: 弧度）
-    # 基于OpenArm URDF的关节轴方向与外骨骼的差异
+    # 7DOF-OArm关节偏置（单位: 弧度）
+    # 基于7DOF-OArm URDF的关节轴方向与外骨骼的差异
     left_arm:  [-1.5707, -1.5707, 0.0, 1.5707, 1.5707, 0.0, 0.0]
     right_arm: [1.5707, 1.5707, 0.0, 1.5707, -1.5707, 0.0, 0.0]
 
   # 外骨骼输入关节补偿（单位: 弧度）
-  # 目标：允许佩戴姿态变化（例如手腕/前臂旋转90度）时，保持OpenArm跟随角度行为不变
+  # 目标：允许佩戴姿态变化（例如手腕/前臂旋转90度）时，保持7DOF-OArm跟随角度行为不变
   # joint5（索引4）：
   # - 左臂向右旋转90° -> -pi/2 补偿
   # - 右臂向左旋转90° -> +pi/2 补偿
@@ -119,7 +119,7 @@ retargeting_params:
     left_arm: cw
     right_arm: cw
 
-  # 关节限位（从OpenArm v10的joint_limits.yaml配置文件获取）
+  # 关节限位（从7DOF-OArm v10的joint_limits.yaml配置文件获取）
   # 基于 openarm_description/config/arm/v10/joint_limits.yaml
   # 注意：joint1和joint2在双臂配置中有offset，这里已考虑
   joint_limits:

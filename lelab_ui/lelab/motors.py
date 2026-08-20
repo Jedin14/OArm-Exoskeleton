@@ -39,13 +39,13 @@ STALE_AFTER_S = 0.5
 
 
 def _direct_io():
-    """Import openarm_direct_io from the repo root (same shim as the robot backend)."""
-    root = os.environ.get("OPENARM_REPO_ROOT") or str(Path(__file__).resolve().parents[2])
+    """Import oarm7dof_direct_io from the repo root (same shim as the robot backend)."""
+    root = os.environ.get("OARM7DOF_REPO_ROOT") or str(Path(__file__).resolve().parents[2])
     if root not in sys.path:
         sys.path.insert(0, root)
-    import openarm_direct_io  # noqa: PLC0415
+    import oarm7dof_direct_io  # noqa: PLC0415
 
-    return openarm_direct_io
+    return oarm7dof_direct_io
 
 
 class TorqueMonitor:
@@ -68,8 +68,8 @@ class TorqueMonitor:
                 try:
                     reader = io.StateReader(
                         channel,
-                        list(io.OPENARM_RECV_IDS),
-                        io.OPENARM_MOTOR_LIMITS,
+                        list(io.OARM7DOF_RECV_IDS),
+                        io.OARM7DOF_MOTOR_LIMITS,
                         fd=True,
                     )
                     reader.start()
@@ -96,7 +96,7 @@ class TorqueMonitor:
             feedback = reader.latest_feedback()
             t_max = reader.torque_limits()
             motors = []
-            for index, can_id in enumerate(io.OPENARM_RECV_IDS):
+            for index, can_id in enumerate(io.OARM7DOF_RECV_IDS):
                 fb = feedback.get(can_id)
                 label = JOINT_LABELS[index] if index < len(JOINT_LABELS) else f"id_{can_id:#x}"
                 if fb is None:
@@ -242,7 +242,7 @@ def bridge_cap_state() -> dict:
     rclpy (which is why _send_ui_command falls back to a subprocess publisher), so
     a subscriber here can never receive anything -- the first attempt at this used
     one and reported `seen: false` forever while the bridge was publishing
-    correctly. openarm_camera_bridge_node.py already uses the same file approach
+    correctly. oarm7dof_camera_bridge_node.py already uses the same file approach
     for /tmp/lelab_camera_status.json.
 
     Silent means an old bridge or no bridge, and in both cases nothing is

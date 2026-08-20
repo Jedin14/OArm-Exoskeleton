@@ -1,5 +1,5 @@
 """
-openarm_fk.py  –  Neural Forward Kinematics for OpenArm
+oarm7dof_fk.py  –  Neural Forward Kinematics for 7DOF-OArm
 
 Computes end-effector pose (xyz + quaternion [xyzw]) for the left and right
 arms given 7 joint angles in RADIANS.

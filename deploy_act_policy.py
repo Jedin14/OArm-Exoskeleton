@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Deploy ACT policy on OpenArm hardware.
+Deploy ACT policy on 7DOF-OArm hardware.
 
 Usage:
     python deploy_act_policy.py                 # Both arms (default)
@@ -30,7 +30,7 @@ INFERENCE_HZ = 30    # Dataset was recorded at 30 fps; model assumes 30Hz tempor
 CONTROL_HZ   = 100   # High-frequency motor control loop for smooth interpolation
 GRIPPER_HOME_PATH = Path(__file__).with_name("gripper_home.yaml")
 
-# Match the ROS 2 OpenArm hardware mapping used during exoskeleton training.
+# Match the ROS 2 7DOF-OArm hardware mapping used during exoskeleton training.
 # BOTH action and observation record the gripper as finger_joint1 aperture in
 # METRES (0.0=closed, 0.044=open). Datasets recorded before /exo/gripper_command_m
 # existed hold the ACTION as a normalised 0..1 trigger instead — check
@@ -178,7 +178,7 @@ inference_running = True
 def inference_worker(policy, cam_main, cam_right, cam_left, is_bimanual, stats):
     """Background thread running policy inference at ~10Hz."""
     global shared_right_state, shared_left_state, shared_target_action, inference_running
-    import openarm_fk
+    import oarm7dof_fk
     
     img_mean = stats["observation.images.main_camera.mean"].to(DEVICE)
     img_std  = stats["observation.images.main_camera.std"].to(DEVICE)
@@ -207,7 +207,7 @@ def inference_worker(policy, cam_main, cam_right, cam_left, is_bimanual, stats):
             continue
             
         # Build state
-        state = openarm_fk.build_state(left_st, right_st)
+        state = oarm7dof_fk.build_state(left_st, right_st)
         
         state_t = torch.tensor(state, dtype=torch.float32).to(DEVICE)
 
@@ -250,7 +250,7 @@ def kill_conflicting_processes():
         "robot_state_publisher",
         "joint_state_broadcaster",
         "rviz2",
-        "openarm_teleop.sh"
+        "oarm7dof_teleop.sh"
     ]
     
     current_pid = os.getpid()

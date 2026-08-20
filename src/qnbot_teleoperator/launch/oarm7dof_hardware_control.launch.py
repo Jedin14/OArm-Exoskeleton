@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenArm硬件控制Launch文件
+7DOF-OArm硬件控制Launch文件
 启动实际机械臂电机控制节点
 """
 
@@ -16,7 +16,7 @@ def generate_launch_description():
     """生成Launch描述"""
     
     # 获取URDF文件的默认路径
-    # 使用与openarm_single_control.py相同的URDF文件
+    # 使用与oarm7dof_single_control.py相同的URDF文件
     pkg_share = FindPackageShare('qnbot_teleoperator').find('qnbot_teleoperator')
     # pkg_share返回的是 .../install/qnbot_teleoperator/share/qnbot_teleoperator
     # 需要回到install目录再找到lib路径
@@ -57,11 +57,11 @@ def generate_launch_description():
         description='是否启用重力补偿'
     )
     
-    # OpenArm硬件控制节点
-    openarm_hardware_control_node = Node(
+    # 7DOF-OArm硬件控制节点
+    oarm7dof_hardware_control_node = Node(
         package='qnbot_teleoperator',
-        executable='openarm_hardware_control_node',
-        name='openarm_hardware_control_node',
+        executable='oarm7dof_hardware_control_node',
+        name='oarm7dof_hardware_control_node',
         output='screen',
         parameters=[{
             'urdf_path': LaunchConfiguration('urdf_path'),
@@ -79,6 +79,6 @@ def generate_launch_description():
         control_frequency_arg,
         gravity_compensation_factor_arg,
         enable_gravity_compensation_arg,
-        openarm_hardware_control_node,
+        oarm7dof_hardware_control_node,
     ])
 
