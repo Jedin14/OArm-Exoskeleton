@@ -617,7 +617,7 @@ fi
 # Step 2: Exoskeleton retargeting -> 7DOF-OArm
 launch_step exo_retargeting \
     ros2 launch qnbot_teleoperator exo_retargeting.launch.py \
-    robot_type:=7DOF-OArm
+    robot_type:=oarm7dof
 
 # Step 3: 7DOF-OArm bimanual (ros2_control + RViz)
 # Use a longer delay so hardware has time to initialise before the bridge connects

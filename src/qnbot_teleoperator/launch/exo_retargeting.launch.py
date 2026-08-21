@@ -16,8 +16,8 @@ def generate_launch_description():
     # 声明启动参数
     declare_robot_type = DeclareLaunchArgument(
         'robot_type',
-        default_value='7DOF-OArm',
-        description='机器人类型 (7DOF-OArm等) - 自动加载对应配置文件'
+        default_value='oarm7dof',
+        description='机器人类型 (oarm7dof等) - 自动加载对应配置文件'
     )
     
     declare_enable_left_arm = DeclareLaunchArgument(

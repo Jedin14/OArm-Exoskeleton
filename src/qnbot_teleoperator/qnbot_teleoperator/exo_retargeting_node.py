@@ -93,12 +93,17 @@ class ExoRetargetingNode(Node):
         super().__init__('exo_retargeting_node')
         
         # 参数声明 - 只保留最基本的参数
-        self.declare_parameter('robot_type', '7DOF-OArm')
+        # robot_type is not a label: it is interpolated into the config filename
+        # (retargeting_{robot_type}.yaml), so its value must match the file on
+        # disk exactly. Renaming it to a display name silently breaks the load.
+        self.declare_parameter('robot_type', 'oarm7dof')
         self.declare_parameter('enable_left_arm_retargeting', True)
         self.declare_parameter('enable_right_arm_retargeting', True)
         
         # 获取参数
-        self.robot_type = self.get_parameter('robot_type').value
+        self.robot_type = self._normalise_robot_type(
+            self.get_parameter('robot_type').value
+        )
         self.enable_left_arm_retargeting = self.get_parameter('enable_left_arm_retargeting').value
         self.enable_right_arm_retargeting = self.get_parameter('enable_right_arm_retargeting').value
 
@@ -143,6 +148,26 @@ class ExoRetargetingNode(Node):
             f'\n  📡 等待外骨骼数据...'
         )
     
+    # Display names and the pre-rename value map onto the one config we ship, so
+    # a stale saved command (or a launch file someone forgot to update) still
+    # starts instead of dying on a missing file.
+    _ROBOT_TYPE_ALIASES = {
+        'openarm': 'oarm7dof',
+        '7dof-oarm': 'oarm7dof',
+        '7dofoarm': 'oarm7dof',
+        'oarm': 'oarm7dof',
+    }
+
+    def _normalise_robot_type(self, robot_type):
+        canonical = self._ROBOT_TYPE_ALIASES.get(str(robot_type).strip().lower())
+        if canonical and canonical != robot_type:
+            self.get_logger().warn(
+                f"robot_type '{robot_type}' 已映射为 '{canonical}' "
+                f"(config: retargeting_{canonical}.yaml)"
+            )
+            return canonical
+        return robot_type
+
     def _setup_config_file_path(self):
         """根据机器人类型自动设置配置文件路径"""
         from ament_index_python.packages import get_package_share_directory
